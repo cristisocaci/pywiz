@@ -20,8 +20,11 @@ class WizCommand(str, Enum):
     LIVING_COOKING = 'LIVING_COOKING'
     LIVING_GUESTS = 'LIVING_GUESTS'
 
-class Item(BaseModel):
+class CommandRequest(BaseModel):
     command: WizCommand
+
+class BrightnessStepRequest(BaseModel):
+    brightness_step: int
 
 class Wiz:
     _instance = None
@@ -121,13 +124,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 @app.post("/command")
-async def create_item(item: Item):
+async def execute_command(item: CommandRequest):
     await wiz.execute_command(item.command)
     return {
         "message": "Command executed",
         "command": item.command
     }
 
+@app.post("/brightness_step")
+def set_brightness_step(item: BrightnessStepRequest):
+    wiz.brightness_step = item.brightness_step
+    return {
+        "message": "Brightness step set successfully",
+        "command": item.brightness_step
+    }
 
 async def main():
 
