@@ -139,6 +139,13 @@ def set_brightness_step(item: BrightnessStepRequest):
         "command": item.brightness_step
     }
 
+@app.get("/brightness_step")
+def get_brightness_step():
+    return {
+        "message": "Brightness step set successfully",
+        "command": wiz.brightness_step
+    }
+
 async def main():
 
     try:   
