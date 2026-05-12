@@ -2,23 +2,35 @@ import asyncio
 
 from enum import Enum
 from pywizlight import wizlight, PilotBuilder
+from fastapi import FastAPI
+from pydantic import BaseModel
+from contextlib import asynccontextmanager
 
+class WizCommand(str, Enum):
+    BEDROOM_TOGGLE = 'BEDROOM_TOGGLE'
+    BEDROOM_BRIGHTNESS_UP = 'BEDROOM_BRIGHTNESS_UP'
+    BEDROOM_BRIGHTNESS_DOWN = 'BEDROOM_BRIGHTNESS_DOWN'
+    BEDROOM_DIM_LIGHT = 'BEDROOM_DIM_LIGHT'
+    BEDROOM_BEDTIME = 'BEDROOM_BEDTIME'
 
-class WizCommand(Enum):
-    BEDROOM_TOGGLE = 1
-    BEDROOM_BRIGHTNESS_UP = 2
-    BEDROOM_BRIGHTNESS_DOWN = 3
-    BEDROOM_DIM_LIGHT = 4
-    BEDROOM_BEDTIME = 5
+    LIVING_TOGGLE = 'LIVING_TOGGLE'
+    LIVING_BRIGHTNESS_UP = 'LIVING_BRIGHTNESS_UP'
+    LIVING_BRIGHTNESS_DOWN = 'LIVING_BRIGHTNESS_DOWN'
+    LIVING_NIGHT_TV = 'LIVING_NIGHT_TV'
+    LIVING_COOKING = 'LIVING_COOKING'
+    LIVING_GUESTS = 'LIVING_GUESTS'
 
-    LIVING_TOGGLE = 10
-    LIVING_BRIGHTNESS_UP = 11
-    LIVING_BRIGHTNESS_DOWN = 12
-    LIVING_NIGHT_TV = 13
-    LIVING_COOKING = 14
-    LIVING_GUESTS = 15
+class Item(BaseModel):
+    command: WizCommand
 
 class Wiz:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(Wiz, cls).__new__(cls)
+        return cls._instance
+
     def __init__(self):
         self.kitchen_light = wizlight("192.168.1.129")
         self.living_light = wizlight("192.168.1.130")
@@ -92,8 +104,32 @@ class Wiz:
             print(f"{bulb_name} is {on_off}. brightness {state.get_brightness()}; warm {state.get_warm_white()}; cold {state.get_cold_white()}; rgb {state.get_rgb()}; colortemp {state.get_colortemp()}")
 
 
+wiz = Wiz()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup logic (if needed)
+    print("App starting...")
+
+    yield  # application runs here
+
+    # Shutdown logic
+    await wiz.cleanup()
+    print("App shutdown complete")
+
+
+app = FastAPI(lifespan=lifespan)
+
+@app.post("/command")
+async def create_item(item: Item):
+    await wiz.execute_command(item.command)
+    return {
+        "message": "Command executed",
+        "command": item.command
+    }
+
+
 async def main():
-    wiz = Wiz()
 
     try:   
         await wiz.execute_command(WizCommand.BEDROOM_BEDTIME)
