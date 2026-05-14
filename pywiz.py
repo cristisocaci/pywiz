@@ -125,7 +125,7 @@ class Wiz:
             print(f"{bulb_name} is {on_off}. brightness {state.get_brightness()}; warm {state.get_warm_white()}; cold {state.get_cold_white()}; rgb {state.get_rgb()}; colortemp {state.get_colortemp()}")
 
 
-def MapActionToCommand(action: ButtonAction):
+def map_action_to_command(action: ButtonAction):
     match action:
         case ButtonAction.single_button_1:
             return WizCommand.LIVING_TOGGLE
@@ -154,7 +154,7 @@ async def execute_command(item: ActionRequest):
     await wiz.execute_command(item.action)
     return {
         "message": "Command executed",
-        "command": item.action
+        "command": map_action_to_command(item.action)
     }
 
 @app.post("/brightness_step")
