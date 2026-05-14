@@ -20,8 +20,26 @@ class WizCommand(str, Enum):
     LIVING_COOKING = 'LIVING_COOKING'
     LIVING_GUESTS = 'LIVING_GUESTS'
 
-class CommandRequest(BaseModel):
-    command: WizCommand
+class ButtonAction(str, Enum):
+    single_button_1 = "single_button_1"
+    double_button_1 = "double_button_1"
+    triple_button_1 = "triple_button_1"
+    long_button_1 = "long_button_1"
+    single_button_2 = "single_button_2"
+    double_button_2 = "double_button_2"
+    triple_button_2 = "triple_button_2"
+    long_button_2 = "long_button_2"
+    single_button_3 = "single_button_3"
+    double_button_3 = "double_button_3"
+    triple_button_3 = "triple_button_3"
+    long_button_3 = "long_button_3"
+    single_button_4 = "single_button_4"
+    double_button_4 = "double_button_4"
+    triple_button_4 = "triple_button_4"
+    long_button_4 = "long_button_4"
+
+class ActionRequest(BaseModel):
+    action: ButtonAction
 
 class BrightnessStepRequest(BaseModel):
     brightness_step: int
@@ -39,7 +57,7 @@ class Wiz:
         self.living_light = wizlight("192.168.1.130")
         self.bedroom_light = wizlight("192.168.1.135")  
 
-        self.brightness_step = 5
+        self.brightness_step = 20
 
         self.bulbs = {"kitchen": self.kitchen_light, "living": self.living_light, "bedroom": self.bedroom_light}
 
@@ -107,6 +125,14 @@ class Wiz:
             print(f"{bulb_name} is {on_off}. brightness {state.get_brightness()}; warm {state.get_warm_white()}; cold {state.get_cold_white()}; rgb {state.get_rgb()}; colortemp {state.get_colortemp()}")
 
 
+def MapActionToCommand(action: ButtonAction):
+    match action:
+        case ButtonAction.single_button_1:
+            return WizCommand.LIVING_TOGGLE
+        
+        case ButtonAction.single_button_2:
+            return WizCommand.BEDROOM_TOGGLE
+
 wiz = Wiz()
 
 @asynccontextmanager
@@ -123,12 +149,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-@app.post("/command")
-async def execute_command(item: CommandRequest):
-    await wiz.execute_command(item.command)
+@app.post("/action")
+async def execute_command(item: ActionRequest):
+    await wiz.execute_command(item.action)
     return {
         "message": "Command executed",
-        "command": item.command
+        "command": item.action
     }
 
 @app.post("/brightness_step")
@@ -142,7 +168,7 @@ def set_brightness_step(item: BrightnessStepRequest):
 @app.get("/brightness_step")
 def get_brightness_step():
     return {
-        "message": "Brightness step set successfully",
+        "message": "Brightness step",
         "command": wiz.brightness_step
     }
 
