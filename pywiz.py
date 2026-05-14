@@ -151,10 +151,11 @@ app = FastAPI(lifespan=lifespan)
 
 @app.post("/action")
 async def execute_command(item: ActionRequest):
-    await wiz.execute_command(item.action)
+    command = map_action_to_command(item.action)
+    await wiz.execute_command(command)
     return {
         "message": "Command executed",
-        "command": map_action_to_command(item.action)
+        "command": command
     }
 
 @app.post("/brightness_step")
