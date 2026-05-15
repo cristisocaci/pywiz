@@ -58,7 +58,7 @@ class Wiz:
         self.living_light = wizlight("192.168.1.130")
         self.bedroom_light = wizlight("192.168.1.135")  
 
-        self.brightness_step = 30
+        self.brightness_step = 50
 
         self.bulbs = {"kitchen": self.kitchen_light, "living": self.living_light, "bedroom": self.bedroom_light}
 
