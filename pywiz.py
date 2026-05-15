@@ -109,7 +109,6 @@ class Wiz:
     async def _modify_brightness(self, bulb: wizlight, step: int, min = 26, max = 255):
         state = await bulb.updateState()
         brightness = state.get_brightness()
-        print(brightness)
         new_brightness = brightness + step
         if new_brightness < min:
             new_brightness = min
@@ -172,12 +171,12 @@ async def execute_command(item: ActionRequest):
     command = map_action_to_command(item.action)
     print(f"Received button action {item.action}. Executing command {command}")
     print("Bulbs state before command")
-    wiz.print_state()
+    await wiz.print_state()
 
     await wiz.execute_command(command)
     
     print("Bulbs state after command")
-    wiz.print_state()
+    await wiz.print_state()
     return {
         "message": "Command executed",
         "command": command
