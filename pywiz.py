@@ -53,6 +53,7 @@ class Wiz:
         return cls._instance
 
     def __init__(self):
+        # TODO guard against closed lights
         self.kitchen_light = wizlight("192.168.1.129")
         self.living_light = wizlight("192.168.1.130")
         self.bedroom_light = wizlight("192.168.1.135")  
@@ -103,7 +104,7 @@ class Wiz:
         if state.get_state():
             await bulb.turn_off()
         else:
-            await bulb.turn_on(PilotBuilder(brightness=255))
+            await bulb.turn_on(PilotBuilder(warm_white=255, brightness=255))
     
     async def _modify_brightness(self, bulb: wizlight, step: int, min = 26, max = 255):
         state = await bulb.updateState()
@@ -117,22 +118,39 @@ class Wiz:
 
         await bulb.turn_on(PilotBuilder(brightness=new_brightness))
 
-    async def _print_state(self):
+    async def print_state(self):
         for bulb_name in self.bulbs:
             bulb = self.bulbs[bulb_name]
             state = await bulb.updateState()
             on_off = "on" if state.get_state() else "off"
             print(f"{bulb_name} is {on_off}. brightness {state.get_brightness()}; warm {state.get_warm_white()}; cold {state.get_cold_white()}; rgb {state.get_rgb()}; colortemp {state.get_colortemp()}")
 
-
 def map_action_to_command(action: ButtonAction):
     match action:
         case ButtonAction.single_button_1:
             return WizCommand.LIVING_TOGGLE
+        case ButtonAction.single_button_3:
+            return WizCommand.LIVING_NIGHT_TV
+        case ButtonAction.double_button_1:
+            return WizCommand.LIVING_COOKING
+        case ButtonAction.double_button_3:
+            return WizCommand.LIVING_GUESTS
+        case ButtonAction.long_button_1:
+            return WizCommand.LIVING_BRIGHTNESS_UP
+        case ButtonAction.long_button_3:
+            return WizCommand.LIVING_BRIGHTNESS_DOWN
         
         case ButtonAction.single_button_2:
             return WizCommand.BEDROOM_TOGGLE
-
+        case ButtonAction.single_button_4:
+            return WizCommand.BEDROOM_BEDTIME
+        case ButtonAction.double_button_4:
+            return WizCommand.BEDROOM_DIM_LIGHT
+        case ButtonAction.long_button_2:
+            return WizCommand.BEDROOM_BRIGHTNESS_UP
+        case ButtonAction.long_button_4:
+            return WizCommand.BEDROOM_BRIGHTNESS_DOWN
+        
 wiz = Wiz()
 
 @asynccontextmanager
@@ -152,7 +170,14 @@ app = FastAPI(lifespan=lifespan)
 @app.post("/action")
 async def execute_command(item: ActionRequest):
     command = map_action_to_command(item.action)
+    print(f"Received button action {item.action}. Executing command {command}")
+    print("Bulbs state before command")
+    wiz.print_state()
+
     await wiz.execute_command(command)
+    
+    print("Bulbs state after command")
+    wiz.print_state()
     return {
         "message": "Command executed",
         "command": command
@@ -178,7 +203,7 @@ async def main():
     try:   
         await wiz.execute_command(WizCommand.BEDROOM_BEDTIME)
 
-        await wiz._print_state()
+        await wiz.print_state()
     finally:
         await wiz.cleanup()
 
