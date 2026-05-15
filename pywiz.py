@@ -58,7 +58,7 @@ class Wiz:
         self.living_light = wizlight("192.168.1.130")
         self.bedroom_light = wizlight("192.168.1.135")  
 
-        self.brightness_step = 20
+        self.brightness_step = 30
 
         self.bulbs = {"kitchen": self.kitchen_light, "living": self.living_light, "bedroom": self.bedroom_light}
 
@@ -67,9 +67,9 @@ class Wiz:
             case WizCommand.BEDROOM_TOGGLE:
                 await self._toggle_bulb(self.bedroom_light)
             case WizCommand.BEDROOM_BRIGHTNESS_UP:
-                self._modify_brightness(self.bedroom_light, self.brightness_step)
+                await self._modify_brightness(self.bedroom_light, self.brightness_step)
             case WizCommand.BEDROOM_BRIGHTNESS_DOWN:
-                self._modify_brightness(self.bedroom_light, -self.brightness_step)
+                await self._modify_brightness(self.bedroom_light, -self.brightness_step)
             case WizCommand.BEDROOM_DIM_LIGHT:
                 await self.bedroom_light.turn_on(PilotBuilder(warm_white=255, brightness=125))
             case WizCommand.BEDROOM_BEDTIME:
