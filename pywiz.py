@@ -53,7 +53,6 @@ class Wiz:
         return cls._instance
 
     def __init__(self):
-        # TODO guard against closed lights
         self.kitchen_light = wizlight("192.168.1.129")
         self.living_light = wizlight("192.168.1.130")
         self.bedroom_light = wizlight("192.168.1.135")  
@@ -62,7 +61,17 @@ class Wiz:
 
         self.brightness_step = 50
 
-        self.bulbs = {"kitchen": self.kitchen_light, "living": self.living_light, "bedroom": self.bedroom_light}
+        self.living_bulbs = {
+            "kitchen": self.kitchen_light, 
+            "living": self.living_light, 
+            "lamp_big": self.lamp_big,
+            "lamp_small": self.lamp_small
+            }
+
+        self.bulbs = {
+            **self.living_bulbs,
+            "bedroom": self.bedroom_light
+        }
 
     async def execute_command(self, c: WizCommand):
         match c:
@@ -78,9 +87,10 @@ class Wiz:
                 await self.bedroom_light.turn_on(PilotBuilder(scene=6, brightness=90)) # cozy
 
             case WizCommand.LIVING_TOGGLE:
-                await self._toggle_bulb(self.kitchen_light)
-                await self._toggle_bulb(self.living_light)
-                await self._toggle_bulb(self.lamp_big)
+                is_living_on = await self._is_living_on()
+                await self._toggle_bulb(self.kitchen_light, is_living_on)
+                await self._toggle_bulb(self.living_light, is_living_on)
+                await self._toggle_bulb(self.lamp_big, is_living_on)
                 await self.lamp_small.turn_off()
             case WizCommand.LIVING_BRIGHTNESS_UP:
                 await self._modify_brightness(self.kitchen_light, self.brightness_step)
@@ -113,13 +123,21 @@ class Wiz:
             bulb = self.bulbs[bulb_name]
             await bulb.async_close()
 
-    async def _toggle_bulb(self, bulb: wizlight):
-        state = await bulb.updateState()
+    async def _toggle_bulb(self, bulb: wizlight, is_on: bool | None = None):
+        state = await bulb.updateState() if is_on is None else is_on
         if state.get_state():
             await bulb.turn_off()
         else:
             await bulb.turn_on(PilotBuilder(warm_white=255, brightness=255))
     
+    async def _is_living_on(self):
+        for bulb in self.living_bulbs.values():
+            state = await bulb.updateState()
+            if state.get_state():
+                return True
+            
+        return False
+               
     async def _modify_brightness(self, bulb: wizlight, step: int, min = 26, max = 255):
         state = await bulb.updateState()
         brightness = state.get_brightness()
