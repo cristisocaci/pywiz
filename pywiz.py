@@ -57,8 +57,8 @@ class Wiz:
         self.kitchen_light = wizlight("192.168.1.129")
         self.living_light = wizlight("192.168.1.130")
         self.bedroom_light = wizlight("192.168.1.135")  
-        self.lamp_big = wizlight("192.168.1.142")
-        self.lamp_small = wizlight("192.168.1.254")
+        self.lamp_big = wizlight("192.168.1.254")
+        self.lamp_small = wizlight("192.168.1.142")
 
         self.brightness_step = 50
 
