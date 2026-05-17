@@ -57,6 +57,8 @@ class Wiz:
         self.kitchen_light = wizlight("192.168.1.129")
         self.living_light = wizlight("192.168.1.130")
         self.bedroom_light = wizlight("192.168.1.135")  
+        self.lamp_big = wizlight("192.168.1.142")
+        self.lamp_small = wizlight("192.168.1.254")
 
         self.brightness_step = 50
 
@@ -78,21 +80,33 @@ class Wiz:
             case WizCommand.LIVING_TOGGLE:
                 await self._toggle_bulb(self.kitchen_light)
                 await self._toggle_bulb(self.living_light)
+                await self._toggle_bulb(self.lamp_big)
+                await self.lamp_small.turn_off()
             case WizCommand.LIVING_BRIGHTNESS_UP:
                 await self._modify_brightness(self.kitchen_light, self.brightness_step)
                 await self._modify_brightness(self.living_light, self.brightness_step)
+                await self._modify_brightness(self.lamp_big, self.brightness_step)
+                await self._modify_brightness(self.lamp_small, self.brightness_step, self.brightness_step)
             case WizCommand.LIVING_BRIGHTNESS_DOWN:
                 await self._modify_brightness(self.kitchen_light, -self.brightness_step)
                 await self._modify_brightness(self.living_light, -self.brightness_step)
+                await self._modify_brightness(self.lamp_big, -self.brightness_step)
+                await self._modify_brightness(self.lamp_small, self.brightness_step, -self.brightness_step)
             case WizCommand.LIVING_NIGHT_TV:
                 await self.kitchen_light.turn_on(PilotBuilder(warm_white=255, brightness=100))
-                await self.living_light.turn_on(PilotBuilder(warm_white=255, brightness=26))
+                await self.living_light.turn_off()
+                await self.lamp_big.turn_off()
+                await self.lamp_small.turn_on(PilotBuilder(warm_white=255, brightness=26))
             case WizCommand.LIVING_COOKING:
                 await self.kitchen_light.turn_on(PilotBuilder(cold_white=255, brightness=255))
                 await self.living_light.turn_on(PilotBuilder(warm_white=255, brightness=190))
+                await self.lamp_big.turn_off()
+                await self.lamp_small.turn_off()
             case WizCommand.LIVING_GUESTS:
                 await self.kitchen_light.turn_on(PilotBuilder(warm_white=255, brightness=125))
                 await self.living_light.turn_on(PilotBuilder(warm_white=255, brightness=255))
+                await self.lamp_big.turn_on(PilotBuilder(warm_white=255, brightness=125))
+                await self.lamp_small.turn_off()
     
     async def cleanup(self):
         for bulb_name in self.bulbs:
