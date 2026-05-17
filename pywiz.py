@@ -131,7 +131,8 @@ class Wiz:
             await bulb.turn_on(PilotBuilder(warm_white=255, brightness=255))
     
     async def _is_living_on(self):
-        for bulb in self.living_bulbs.values():
+        for bulb_name in self.living_bulbs:
+            bulb = self.living_bulbs[bulb_name]
             state = await bulb.updateState()
             if state.get_state():
                 return True
@@ -232,7 +233,7 @@ def get_brightness_step():
 async def main():
 
     try:   
-        await wiz.execute_command(WizCommand.BEDROOM_BEDTIME)
+        await wiz.execute_command(WizCommand.LIVING_TOGGLE)
 
         await wiz.print_state()
     finally:
