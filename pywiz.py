@@ -124,8 +124,8 @@ class Wiz:
             await bulb.async_close()
 
     async def _toggle_bulb(self, bulb: wizlight, is_on: bool | None = None):
-        state = await bulb.updateState() if is_on is None else is_on
-        if state.get_state():
+        state = (await bulb.updateState()).get_state() if is_on is None else is_on
+        if state:
             await bulb.turn_off()
         else:
             await bulb.turn_on(PilotBuilder(warm_white=255, brightness=255))
