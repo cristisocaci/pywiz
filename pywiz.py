@@ -59,7 +59,7 @@ class Wiz:
         self.lamp_big = wizlight("192.168.1.254")
         self.lamp_small = wizlight("192.168.1.142")
 
-        self.brightness_step = 50
+        self.brightness_step = 75
 
         self.living_bulbs = {
             "kitchen": self.kitchen_light, 
@@ -96,12 +96,12 @@ class Wiz:
                 await self._modify_brightness(self.kitchen_light, self.brightness_step)
                 await self._modify_brightness(self.living_light, self.brightness_step)
                 await self._modify_brightness(self.lamp_big, self.brightness_step)
-                await self._modify_brightness(self.lamp_small, self.brightness_step, self.brightness_step)
+                await self._modify_brightness(self.lamp_small, self.brightness_step)
             case WizCommand.LIVING_BRIGHTNESS_DOWN:
                 await self._modify_brightness(self.kitchen_light, -self.brightness_step)
                 await self._modify_brightness(self.living_light, -self.brightness_step)
                 await self._modify_brightness(self.lamp_big, -self.brightness_step)
-                await self._modify_brightness(self.lamp_small, self.brightness_step, -self.brightness_step)
+                await self._modify_brightness(self.lamp_small, -self.brightness_step)
             case WizCommand.LIVING_NIGHT_TV:
                 await self.kitchen_light.turn_on(PilotBuilder(warm_white=255, brightness=100))
                 await self.living_light.turn_off()
