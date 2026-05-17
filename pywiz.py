@@ -91,7 +91,7 @@ class Wiz:
                 await self._toggle_bulb(self.kitchen_light, is_living_on)
                 await self._toggle_bulb(self.living_light, is_living_on)
                 await self._toggle_bulb(self.lamp_big, is_living_on)
-                await self.lamp_small.turn_off()
+                await self._toggle_bulb(self.lamp_small, is_living_on)
             case WizCommand.LIVING_BRIGHTNESS_UP:
                 await self._modify_brightness(self.kitchen_light, self.brightness_step)
                 await self._modify_brightness(self.living_light, self.brightness_step)
