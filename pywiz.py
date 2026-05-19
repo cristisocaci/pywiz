@@ -7,6 +7,8 @@ from pydantic import BaseModel
 from contextlib import asynccontextmanager
 import paho.mqtt.client as mqtt
 import os
+import json
+
 class WizCommand(str, Enum):
     BEDROOM_TOGGLE = 'BEDROOM_TOGGLE'
     BEDROOM_BRIGHTNESS_UP = 'BEDROOM_BRIGHTNESS_UP'
@@ -54,6 +56,7 @@ class Wiz:
         return cls._instance
 
     def __init__(self):
+        self.debug = False
         self.kitchen_light = wizlight("192.168.1.129")
         self.living_light = wizlight("192.168.1.130")
         self.bedroom_light = wizlight("192.168.1.135")  
@@ -158,6 +161,9 @@ class Wiz:
         await bulb.turn_on(PilotBuilder(brightness=new_brightness))
 
     async def print_state(self):
+        if not self.debug:
+            return
+        
         for bulb_name in self.bulbs:
             bulb = self.bulbs[bulb_name]
             state = await bulb.updateState()
@@ -191,6 +197,21 @@ def map_action_to_command(action: ButtonAction):
             return WizCommand.BEDROOM_BRIGHTNESS_DOWN
         
 wiz = Wiz()
+main_loop = None
+
+async def execute_action(action: ButtonAction):
+    command = map_action_to_command(action)
+    print(f"Received button action {action}. Executing command {command}")
+    if wiz.debug:
+        print("Bulbs state before command")
+        await wiz.print_state()
+
+    await wiz.execute_command(command)
+    
+    if wiz.debug:
+        print("Bulbs state after command")
+        await wiz.print_state()
+    return command
 
 
 def on_connect(client, userdata, flags, reason_code, properties):
@@ -199,11 +220,19 @@ def on_connect(client, userdata, flags, reason_code, properties):
 
 def on_message(client, userdata, msg):
     print(f"Received message on topic {msg.topic}: {msg.payload.decode()}")
+    try:
+            payload = json.loads(msg.payload.decode('utf-8'))    
+            action = payload["action"]
+
+            asyncio.run_coroutine_threadsafe(execute_action(ButtonAction(action)), main_loop)
+    except (json.JSONDecodeError, KeyError, ValueError) as e:
+        print(f"Error processing message: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup logic (if needed)
     print("App starting...")
+    global main_loop
+    main_loop = asyncio.get_running_loop()
 
     mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 
@@ -215,7 +244,7 @@ async def lifespan(app: FastAPI):
 
     mqtt_client.username_pw_set(username, password)
     mqtt_client.connect("192.168.1.105")
-    mqtt_client.loop_forever()
+    mqtt_client.loop_start()
     app.state.mqtt_client = mqtt_client
 
     yield  # application runs here
@@ -231,15 +260,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.post("/action")
 async def execute_command(item: ActionRequest):
-    command = map_action_to_command(item.action)
-    print(f"Received button action {item.action}. Executing command {command}")
-    print("Bulbs state before command")
-    await wiz.print_state()
-
-    await wiz.execute_command(command)
-    
-    print("Bulbs state after command")
-    await wiz.print_state()
+    command = await execute_action(item.action)
     return {
         "message": "Command executed",
         "command": command
@@ -258,6 +279,14 @@ def get_brightness_step():
     return {
         "message": "Brightness step",
         "command": wiz.brightness_step
+    }
+
+@app.get("/debug")
+def toggle_debug():
+    wiz.debug = not wiz.debug
+    return {
+        "message": "Debug toggled",
+        "command": wiz.debug
     }
 
 async def main():
