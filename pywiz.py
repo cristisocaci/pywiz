@@ -88,35 +88,41 @@ class Wiz:
 
             case WizCommand.LIVING_TOGGLE:
                 is_living_on = await self._is_living_on()
-                await self._toggle_bulb(self.kitchen_light, is_living_on)
-                await self._toggle_bulb(self.living_light, is_living_on)
-                await self._toggle_bulb(self.lamp_big, is_living_on)
-                await self._toggle_bulb(self.lamp_small, is_living_on)
+                await asyncio.gather(
+                    self._toggle_bulb(self.kitchen_light, is_living_on),
+                    self._toggle_bulb(self.living_light, is_living_on),
+                    self._toggle_bulb(self.lamp_big, is_living_on),
+                    self._toggle_bulb(self.lamp_small, is_living_on))
             case WizCommand.LIVING_BRIGHTNESS_UP:
-                await self._modify_brightness(self.kitchen_light, self.brightness_step)
-                await self._modify_brightness(self.living_light, self.brightness_step)
-                await self._modify_brightness(self.lamp_big, self.brightness_step)
-                await self._modify_brightness(self.lamp_small, self.brightness_step)
+                await asyncio.gather(
+                    self._modify_brightness(self.kitchen_light, self.brightness_step),
+                    self._modify_brightness(self.living_light, self.brightness_step), 
+                    self._modify_brightness(self.lamp_big, self.brightness_step),
+                    self._modify_brightness(self.lamp_small, self.brightness_step))
             case WizCommand.LIVING_BRIGHTNESS_DOWN:
-                await self._modify_brightness(self.kitchen_light, -self.brightness_step)
-                await self._modify_brightness(self.living_light, -self.brightness_step)
-                await self._modify_brightness(self.lamp_big, -self.brightness_step)
-                await self._modify_brightness(self.lamp_small, -self.brightness_step)
+                await asyncio.gather(
+                    self._modify_brightness(self.kitchen_light, -self.brightness_step),
+                    self._modify_brightness(self.living_light, -self.brightness_step),
+                    self._modify_brightness(self.lamp_big, -self.brightness_step),
+                    self._modify_brightness(self.lamp_small, -self.brightness_step))
             case WizCommand.LIVING_NIGHT_TV:
-                await self.kitchen_light.turn_on(PilotBuilder(warm_white=255, brightness=90))
-                await self.living_light.turn_off()
-                await self.lamp_big.turn_off()
-                await self.lamp_small.turn_on(PilotBuilder(warm_white=255, brightness=26))
+                await asyncio.gather(
+                    self.kitchen_light.turn_on(PilotBuilder(warm_white=255, brightness=90)),
+                    self.living_light.turn_off(),
+                    self.lamp_big.turn_off(),
+                    self.lamp_small.turn_on(PilotBuilder(warm_white=255, brightness=26)))
             case WizCommand.LIVING_COOKING:
-                await self.kitchen_light.turn_on(PilotBuilder(cold_white=255, brightness=255))
-                await self.living_light.turn_on(PilotBuilder(warm_white=255, brightness=130))
-                await self.lamp_big.turn_on(PilotBuilder(warm_white=255, brightness=130))
-                await self.lamp_small.turn_on(PilotBuilder(cold_white=255, brightness=255))
+                await asyncio.gather(
+                    self.kitchen_light.turn_on(PilotBuilder(cold_white=255, brightness=255)),
+                    self.living_light.turn_on(PilotBuilder(warm_white=255, brightness=130)),
+                    self.lamp_big.turn_on(PilotBuilder(warm_white=255, brightness=130)),
+                    self.lamp_small.turn_on(PilotBuilder(cold_white=255, brightness=255)))
             case WizCommand.LIVING_GUESTS:
-                await self.kitchen_light.turn_on(PilotBuilder(warm_white=255, brightness=125))
-                await self.living_light.turn_on(PilotBuilder(warm_white=255, brightness=255))
-                await self.lamp_big.turn_on(PilotBuilder(warm_white=255, brightness=125))
-                await self.lamp_small.turn_off()
+                await asyncio.gather(
+                    self.kitchen_light.turn_on(PilotBuilder(warm_white=255, brightness=125)),
+                    self.living_light.turn_on(PilotBuilder(warm_white=255, brightness=255)),
+                    self.lamp_big.turn_on(PilotBuilder(warm_white=255, brightness=125)),
+                    self.lamp_small.turn_off())
     
     async def cleanup(self):
         for bulb_name in self.bulbs:
