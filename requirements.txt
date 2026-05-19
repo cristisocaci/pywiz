@@ -1,3 +1,4 @@
 fastapi==0.136.1
 pywizlight==0.6.3
 uvicorn==0.46.0
+paho-mqtt==2.1.0

@@ -5,7 +5,8 @@ from pywizlight import wizlight, PilotBuilder
 from fastapi import FastAPI
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
-
+import paho.mqtt.client as mqtt
+import os
 class WizCommand(str, Enum):
     BEDROOM_TOGGLE = 'BEDROOM_TOGGLE'
     BEDROOM_BRIGHTNESS_UP = 'BEDROOM_BRIGHTNESS_UP'
@@ -235,6 +236,25 @@ def get_brightness_step():
         "message": "Brightness step",
         "command": wiz.brightness_step
     }
+
+
+def on_connect(client, userdata, flags, reason_code, properties):
+    print(f"Connected with result code {reason_code}")
+    client.subscribe("zigbee2mqtt/button")
+
+def on_message(client, userdata, msg):
+    print(f"Received message on topic {msg.topic}: {msg.payload.decode()}")
+
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+
+client.on_connect = on_connect
+client.on_message = on_message
+
+username = os.getenv('MQTT_USERNAME')
+password = os.getenv('MQTT_PASSWORD')
+client.username_pw_set(username, password)
+client.connect("192.168.1.105")
+client.loop_forever()
 
 async def main():
 
