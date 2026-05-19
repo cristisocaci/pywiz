@@ -103,15 +103,15 @@ class Wiz:
                 await self._modify_brightness(self.lamp_big, -self.brightness_step)
                 await self._modify_brightness(self.lamp_small, -self.brightness_step)
             case WizCommand.LIVING_NIGHT_TV:
-                await self.kitchen_light.turn_on(PilotBuilder(warm_white=255, brightness=100))
+                await self.kitchen_light.turn_on(PilotBuilder(warm_white=255, brightness=90))
                 await self.living_light.turn_off()
                 await self.lamp_big.turn_off()
                 await self.lamp_small.turn_on(PilotBuilder(warm_white=255, brightness=26))
             case WizCommand.LIVING_COOKING:
                 await self.kitchen_light.turn_on(PilotBuilder(cold_white=255, brightness=255))
-                await self.living_light.turn_on(PilotBuilder(warm_white=255, brightness=190))
-                await self.lamp_big.turn_off()
-                await self.lamp_small.turn_off()
+                await self.living_light.turn_on(PilotBuilder(warm_white=255, brightness=130))
+                await self.lamp_big.turn_on(PilotBuilder(warm_white=255, brightness=130))
+                await self.lamp_small.turn_on(PilotBuilder(cold_white=255, brightness=255))
             case WizCommand.LIVING_GUESTS:
                 await self.kitchen_light.turn_on(PilotBuilder(warm_white=255, brightness=125))
                 await self.living_light.turn_on(PilotBuilder(warm_white=255, brightness=255))
