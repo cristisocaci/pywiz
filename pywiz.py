@@ -111,9 +111,9 @@ class Wiz:
                     self._modify_brightness(self.lamp_small, -self.brightness_step))
             case WizCommand.LIVING_NIGHT_TV:
                 await asyncio.gather(
-                    self.kitchen_light.turn_on(PilotBuilder(warm_white=255, brightness=90)),
+                    self.kitchen_light.turn_off(),
                     self.living_light.turn_off(),
-                    self.lamp_big.turn_off(),
+                    self.lamp_big.turn_on(PilotBuilder(warm_white=255, brightness=90)),
                     self.lamp_small.turn_on(PilotBuilder(warm_white=255, brightness=26)))
             case WizCommand.LIVING_COOKING:
                 await asyncio.gather(
