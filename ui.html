@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>pywiz</title>
+<style>
+  :root {
+    --bg: #14161a;
+    --card: #1d2026;
+    --line: #2c313a;
+    --text: #e8eaee;
+    --muted: #9aa2b1;
+    --accent: #f5b544;
+    --accent-ink: #23262c;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f3f4f6;
+      --card: #ffffff;
+      --line: #e0e3e8;
+      --text: #1b1e24;
+      --muted: #6b7280;
+      --accent: #d99311;
+      --accent-ink: #ffffff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 1rem 1rem 4rem;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header { display: flex; align-items: baseline; gap: .6rem; margin-bottom: 1rem; }
+  h1 { font-size: 1.25rem; margin: 0; }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 1.5rem 0 .6rem; }
+  .refresh {
+    margin-left: auto; background: none; border: 1px solid var(--line); color: var(--muted);
+    border-radius: 999px; padding: .35rem .8rem; font-size: .8rem;
+  }
+  .scene {
+    background: var(--card); border: 1px solid var(--line); border-radius: .8rem;
+    padding: .85rem; margin-bottom: .6rem;
+  }
+  .scene-head { display: flex; align-items: center; gap: .5rem; }
+  .slug { font-weight: 600; }
+  .badge {
+    font-size: .68rem; text-transform: uppercase; letter-spacing: .05em;
+    border: 1px solid var(--line); border-radius: 999px; padding: .1rem .5rem; color: var(--muted);
+  }
+  .badge.captured { border-color: var(--accent); color: var(--accent); }
+  .bulbs { margin: .55rem 0 .7rem; font-size: .82rem; color: var(--muted); }
+  .bulbs div { display: flex; justify-content: space-between; gap: 1rem; padding: .1rem 0; }
+  .bulbs b { font-weight: 500; color: var(--text); }
+  .actions { display: flex; gap: .45rem; flex-wrap: wrap; }
+  button {
+    font: inherit; font-size: .85rem; border-radius: .55rem; padding: .5rem .9rem;
+    border: 1px solid var(--line); background: transparent; color: var(--text); cursor: pointer;
+    min-height: 2.4rem;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  button:disabled { opacity: .45; }
+  .new { display: flex; gap: .45rem; margin-top: .3rem; }
+  .new input {
+    flex: 1; font: inherit; font-size: .85rem; padding: .5rem .7rem; border-radius: .55rem;
+    border: 1px solid var(--line); background: var(--card); color: var(--text); min-width: 0;
+  }
+  .binding { display: flex; align-items: center; gap: .5rem; margin: 0 0 .7rem; font-size: .8rem; color: var(--muted); }
+  .binding button { padding: .35rem .6rem; font-size: .75rem; min-height: 0; white-space: nowrap; }
+  select {
+    flex: 1; font: inherit; font-size: .82rem; padding: .45rem .5rem; border-radius: .55rem;
+    border: 1px solid var(--line); background: var(--bg); color: var(--text); min-width: 0;
+  }
+  select.bound { border-color: var(--accent); color: var(--accent); }
+  .buttons { width: 100%; border-collapse: collapse; font-size: .82rem; }
+  .buttons th { text-align: left; font-weight: 500; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; }
+  .buttons td, .buttons th { padding: .35rem .4rem; border-bottom: 1px solid var(--line); }
+  .buttons td.target { color: var(--muted); }
+  .buttons td.target.custom { color: var(--accent); }
+  .buttons button { padding: .2rem .5rem; font-size: .72rem; min-height: 0; }
+  #toast {
+    position: fixed; left: 1rem; right: 1rem; bottom: 1rem; padding: .7rem .9rem;
+    border-radius: .6rem; background: var(--card); border: 1px solid var(--line);
+    font-size: .85rem; opacity: 0; transition: opacity .2s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; }
+  #toast.error { border-color: #c0392b; color: #ff8b7d; }
+</style>
+</head>
+<body>
+<header>
+  <h1>pywiz</h1>
+  <button class="refresh" onclick="load()">refresh</button>
+</header>
+
+<main id="rooms">loading…</main>
+<div id="toast"></div>
+
+<script>
+let sceneNames = {};
+let buttons = {};
+
+const PRESSES = ["single", "double", "triple", "long"];
+const actionLabel = action => {
+  const [press, , number] = action.split("_");
+  return `button ${number} · ${press}`;
+};
+
+async function api(path, payload) {
+  const options = payload === undefined ? {} : {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload)
+  };
+
+  const res = await fetch(path, options);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.detail || res.statusText);
+  return body;
+}
+
+// Turn a stored BulbState back into something readable.
+function describeBulb(state) {
+  if (!state.state) return "off";
+
+  const parts = [];
+  if (state.scene) parts.push(sceneNames[state.scene] || `scene ${state.scene}`);
+  if (state.colortemp) parts.push(`${state.colortemp}K`);
+  if (state.rgb && state.rgb.some(v => v > 0)) parts.push(`rgb(${state.rgb.join(", ")})`);
+  if (!parts.length && state.warm_white) parts.push("warm");
+  if (!parts.length && state.cold_white) parts.push("cold");
+  if (state.brightness != null) parts.push(`${Math.round(state.brightness / 255 * 100)}%`);
+  return parts.join(" · ") || "on";
+}
+
+// Every button action, marked with what it does today, so a scene can be moved onto one.
+function buttonOptions(current) {
+  const options = Object.entries(buttons).map(([action, button]) => {
+    const taken = action !== current && button.label !== "unassigned" ? ` — ${button.label}` : "";
+    return `<option value="${action}" ${action === current ? "selected" : ""}>${actionLabel(action)}${taken}</option>`;
+  });
+
+  return `<option value="" ${current ? "" : "selected"}>— no button —</option>${options.join("")}`;
+}
+
+// Offer the button's default back, e.g. after putting a scene on button 1 single by mistake.
+function resetButtonControl(action) {
+  const button = action && buttons[action];
+  if (!button || button.source !== "custom" || !button.has_default) return "";
+
+  return `<button onclick="resetButton('${action}')" title="put ${actionLabel(action)} back to its default">reset button</button>`;
+}
+
+function sceneCard(room, slug, scene) {
+  const bulbs = Object.entries(scene.bulbs)
+    .map(([name, state]) => `<div><span>${name}</span><b>${describeBulb(state)}</b></div>`)
+    .join("");
+
+  return `<div class="scene">
+    <div class="scene-head">
+      <span class="slug">${slug}</span>
+      <span class="badge ${scene.source}">${scene.source}</span>
+    </div>
+    <div class="bulbs">${bulbs}</div>
+    <div class="binding">
+      <select class="${scene.button ? "bound" : ""}" onchange="bind('${room}', '${slug}', this.value)">
+        ${buttonOptions(scene.button)}
+      </select>
+      ${resetButtonControl(scene.button)}
+    </div>
+    <div class="actions">
+      <button class="primary" onclick="act('${room}', '${slug}', 'capture')">capture</button>
+      <button onclick="act('${room}', '${slug}', 'apply')">apply</button>
+      ${scene.has_default ? `<button onclick="act('${room}', '${slug}', 'default')" ${scene.source === "captured" ? "" : "disabled"}>reset</button>` : ""}
+    </div>
+  </div>`;
+}
+
+function buttonsTable() {
+  const rows = [1, 2, 3, 4].map(number => {
+    const cells = PRESSES.map(press => {
+      const action = `${press}_button_${number}`;
+      const button = buttons[action];
+      const reset = button.source === "custom" && button.has_default
+        ? ` <button onclick="resetButton('${action}')">reset</button>` : "";
+      return `<td class="target ${button.source}">${button.label}${reset}</td>`;
+    });
+    return `<tr><th>${number}</th>${cells.join("")}</tr>`;
+  });
+
+  return `<section>
+    <h2>buttons</h2>
+    <table class="buttons">
+      <tr><th></th>${PRESSES.map(p => `<th>${p}</th>`).join("")}</tr>
+      ${rows.join("")}
+    </table>
+  </section>`;
+}
+
+async function load() {
+  buttons = await api("/buttons");
+  const rooms = await api("/room");
+  const sections = await Promise.all(Object.keys(rooms).map(async room => {
+    const scenes = await api(`/room/${room}/scenes`);
+    const cards = Object.entries(scenes).map(([slug, scene]) => sceneCard(room, slug, scene)).join("");
+    return `<section>
+      <h2>${room} · ${Object.keys(rooms[room].bulbs).join(", ")}</h2>
+      ${cards}
+      <div class="new">
+        <input id="new-${room}" placeholder="new scene, e.g. candle" autocapitalize="off" autocorrect="off">
+        <button onclick="captureNew('${room}')">capture</button>
+      </div>
+    </section>`;
+  }));
+
+  document.getElementById("rooms").innerHTML = sections.join("") + buttonsTable();
+}
+
+async function bind(room, slug, action) {
+  try {
+    const res = await api(`/room/${room}/scenes/${slug}/button`, {action: action || null});
+    toast(res.message);
+  } catch (e) {
+    toast(e.message, true);
+  }
+  await load();
+}
+
+async function resetButton(action) {
+  if (!confirm(`Put ${actionLabel(action)} back to its default, dropping "${buttons[action].label}"?`)) return;
+
+  try {
+    const res = await api(`/buttons/${action}/default`);
+    toast(res.message);
+  } catch (e) {
+    toast(e.message, true);
+  }
+  await load();
+}
+
+// capture and reset both throw away a stored scene, so both ask first.
+async function act(room, slug, action, exists = true) {
+  const question = action === "capture"
+    ? (exists ? `Overwrite ${room}/${slug} with what the lights are doing now?`
+              : `Save what the lights are doing now as ${room}/${slug}?`)
+    : `Reset ${room}/${slug} to its default, dropping what you captured?`;
+
+  if (action !== "apply" && !confirm(question)) return;
+
+  try {
+    const res = await api(`/room/${room}/scenes/${slug}/${action}`);
+    toast(res.message);
+    if (action !== "apply") await load();
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function captureNew(room) {
+  const input = document.getElementById(`new-${room}`);
+  const slug = input.value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  if (!slug) return toast("Name the scene first", true);
+
+  const exists = [...document.querySelectorAll(".slug")].some(el => el.textContent === slug);
+  input.value = "";
+  await act(room, slug, "capture", exists);
+}
+
+let toastTimer;
+function toast(message, isError = false) {
+  const el = document.getElementById("toast");
+  el.textContent = message;
+  el.className = `show${isError ? " error" : ""}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (el.className = ""), 2600);
+}
+
+(async () => {
+  try {
+    sceneNames = await api("/scene-names");
+    await load();
+  } catch (e) {
+    document.getElementById("rooms").textContent = e.message;
+  }
+})();
+</script>
+</body>
+</html>

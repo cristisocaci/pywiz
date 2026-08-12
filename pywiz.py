@@ -7,36 +7,26 @@ from pywizlight.bulb import PilotParser
 from pywizlight.scenes import SCENES
 from pywizlight.utils import hex_to_percent
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, model_validator
 from contextlib import asynccontextmanager
 import paho.mqtt.client as mqtt
 import os
 import json
 
 SCENES_FILE = Path(__file__).with_name("scenes.json")
+BINDINGS_FILE = Path(__file__).with_name("bindings.json")
+UI_FILE = Path(__file__).with_name("ui.html")
 
 class WizCommand(str, Enum):
+    """Everything a button can do that is not a scene."""
     BEDROOM_TOGGLE = 'BEDROOM_TOGGLE'
     BEDROOM_BRIGHTNESS_UP = 'BEDROOM_BRIGHTNESS_UP'
     BEDROOM_BRIGHTNESS_DOWN = 'BEDROOM_BRIGHTNESS_DOWN'
-    BEDROOM_DIM_LIGHT = 'BEDROOM_DIM_LIGHT'
-    BEDROOM_BEDTIME = 'BEDROOM_BEDTIME'
 
     LIVING_TOGGLE = 'LIVING_TOGGLE'
     LIVING_BRIGHTNESS_UP = 'LIVING_BRIGHTNESS_UP'
     LIVING_BRIGHTNESS_DOWN = 'LIVING_BRIGHTNESS_DOWN'
-    LIVING_NIGHT_TV = 'LIVING_NIGHT_TV'
-    LIVING_COOKING = 'LIVING_COOKING'
-    LIVING_GUESTS = 'LIVING_GUESTS'
-
-SCENE_COMMANDS = {
-    WizCommand.BEDROOM_DIM_LIGHT: ("bedroom", "dim-light"),
-    WizCommand.BEDROOM_BEDTIME: ("bedroom", "bedtime"),
-
-    WizCommand.LIVING_NIGHT_TV: ("living", "night-tv"),
-    WizCommand.LIVING_COOKING: ("living", "cooking"),
-    WizCommand.LIVING_GUESTS: ("living", "guests"),
-}
 
 class ButtonAction(str, Enum):
     single_button_1 = "single_button_1"
@@ -61,6 +51,35 @@ class ActionRequest(BaseModel):
 
 class BrightnessStepRequest(BaseModel):
     brightness_step: int
+
+class Binding(BaseModel):
+    """What a button action does: a command, a scene, or nothing."""
+    command: WizCommand | None = None
+    room: str | None = None
+    scene: str | None = None
+
+    @model_validator(mode="after")
+    def check_target(self):
+        if (self.room is None) != (self.scene is None):
+            raise ValueError("room and scene go together")
+        if self.command is not None and self.scene is not None:
+            raise ValueError("a button is either a command or a scene, not both")
+        return self
+
+    @property
+    def is_empty(self):
+        return self.command is None and self.scene is None
+
+    @property
+    def label(self):
+        if self.command is not None:
+            return self.command.value.lower().replace("_", " ")
+        if self.scene is not None:
+            return f"{self.room}/{self.scene}"
+        return "unassigned"
+
+class ButtonRequest(BaseModel):
+    action: ButtonAction | None = None
 
 class BulbState(BaseModel):
     """What a single bulb should look like as part of a scene."""
@@ -136,6 +155,39 @@ DEFAULT_SCENES: dict[str, dict[str, dict[str, BulbState]]] = {
     },
 }
 
+DEFAULT_BINDINGS: dict[ButtonAction, Binding] = {
+    ButtonAction.single_button_1: Binding(command=WizCommand.LIVING_TOGGLE),
+    ButtonAction.double_button_1: Binding(room="living", scene="cooking"),
+    ButtonAction.long_button_1: Binding(command=WizCommand.LIVING_BRIGHTNESS_UP),
+
+    ButtonAction.single_button_2: Binding(command=WizCommand.BEDROOM_TOGGLE),
+    ButtonAction.long_button_2: Binding(command=WizCommand.BEDROOM_BRIGHTNESS_UP),
+
+    ButtonAction.single_button_3: Binding(room="living", scene="night-tv"),
+    ButtonAction.double_button_3: Binding(room="living", scene="guests"),
+    ButtonAction.long_button_3: Binding(command=WizCommand.LIVING_BRIGHTNESS_DOWN),
+
+    ButtonAction.single_button_4: Binding(room="bedroom", scene="bedtime"),
+    ButtonAction.double_button_4: Binding(room="bedroom", scene="dim-light"),
+    ButtonAction.long_button_4: Binding(command=WizCommand.BEDROOM_BRIGHTNESS_DOWN),
+}
+
+def load_bindings():
+    """Read the button bindings that override the defaults."""
+    if not BINDINGS_FILE.exists():
+        return {}
+
+    with BINDINGS_FILE.open(encoding="utf-8") as f:
+        raw = json.load(f)
+
+    return {ButtonAction(action): Binding(**binding) for action, binding in raw.items()}
+
+def save_bindings(bindings):
+    raw = {action.value: binding.model_dump(exclude_none=True) for action, binding in bindings.items()}
+
+    with BINDINGS_FILE.open("w", encoding="utf-8") as f:
+        json.dump(raw, f, indent=2)
+
 def load_scenes():
     """Read the captured scenes that override the defaults."""
     if not SCENES_FILE.exists():
@@ -200,6 +252,60 @@ class Wiz:
         }
 
         self.captured_scenes = load_scenes()
+        self.custom_bindings = load_bindings()
+
+    def get_binding(self, action: ButtonAction):
+        if action in self.custom_bindings:
+            return self.custom_bindings[action]
+        return DEFAULT_BINDINGS.get(action, Binding())
+
+    def list_bindings(self):
+        return {
+            action.value: {
+                "source": "custom" if action in self.custom_bindings else "default",
+                "has_default": action in DEFAULT_BINDINGS,
+                "label": self.get_binding(action).label,
+                "binding": self.get_binding(action).model_dump(exclude_none=True)
+            }
+            for action in ButtonAction
+        }
+
+    def scene_button(self, room: str, slug: str):
+        """The button action a scene is currently on, if any."""
+        for action in ButtonAction:
+            binding = self.get_binding(action)
+            if binding.room == room and binding.scene == slug:
+                return action.value
+        return None
+
+    def bind_scene(self, room: str, slug: str, action: ButtonAction | None):
+        """Put a scene on a button, taking it off whatever button it was on."""
+        self.get_scene(room, slug)
+
+        for other in ButtonAction:
+            binding = self.get_binding(other)
+            if binding.room == room and binding.scene == slug and other != action:
+                self._set_binding(other, Binding())
+
+        if action is not None:
+            self._set_binding(action, Binding(room=room, scene=slug))
+
+        save_bindings(self.custom_bindings)
+        return self.get_binding(action) if action else None
+
+    def _set_binding(self, action: ButtonAction, binding: Binding):
+        """Only bindings that differ from the default are worth storing."""
+        if binding == DEFAULT_BINDINGS.get(action, Binding()):
+            self.custom_bindings.pop(action, None)
+        else:
+            self.custom_bindings[action] = binding
+
+    def reset_binding(self, action: ButtonAction):
+        """Drop the custom binding so the hardcoded default applies again."""
+        was_custom = self.custom_bindings.pop(action, None) is not None
+        if was_custom:
+            save_bindings(self.custom_bindings)
+        return was_custom
 
     def room_bulbs(self, room: str):
         if room not in self.rooms:
@@ -233,6 +339,7 @@ class Wiz:
         return {
             "source": "captured" if slug in self.captured_scenes.get(room, {}) else "default",
             "has_default": slug in DEFAULT_SCENES.get(room, {}),
+            "button": self.scene_button(room, slug),
             "bulbs": {name: state.model_dump(exclude_none=True) for name, state in scene.items()}
         }
 
@@ -287,10 +394,6 @@ class Wiz:
         await bulb.turn_on(state.to_pilot())
 
     async def execute_command(self, c: WizCommand):
-        if c in SCENE_COMMANDS:
-            await self.apply_scene(*SCENE_COMMANDS[c])
-            return
-
         match c:
             case WizCommand.BEDROOM_TOGGLE:
                 await self._toggle_bulb(self.bedroom_light)
@@ -361,48 +464,31 @@ class Wiz:
             scene = state.get_scene() or state.get_scene_id()
             print(f"{bulb_name} is {on_off}. brightness {state.get_brightness()}; scene {scene}; warm {state.get_warm_white()}; cold {state.get_cold_white()}; rgb {state.get_rgb()}; colortemp {state.get_colortemp()}")
 
-def map_action_to_command(action: ButtonAction):
-    match action:
-        case ButtonAction.single_button_1:
-            return WizCommand.LIVING_TOGGLE
-        case ButtonAction.single_button_3:
-            return WizCommand.LIVING_NIGHT_TV
-        case ButtonAction.double_button_1:
-            return WizCommand.LIVING_COOKING
-        case ButtonAction.double_button_3:
-            return WizCommand.LIVING_GUESTS
-        case ButtonAction.long_button_1:
-            return WizCommand.LIVING_BRIGHTNESS_UP
-        case ButtonAction.long_button_3:
-            return WizCommand.LIVING_BRIGHTNESS_DOWN
-        
-        case ButtonAction.single_button_2:
-            return WizCommand.BEDROOM_TOGGLE
-        case ButtonAction.single_button_4:
-            return WizCommand.BEDROOM_BEDTIME
-        case ButtonAction.double_button_4:
-            return WizCommand.BEDROOM_DIM_LIGHT
-        case ButtonAction.long_button_2:
-            return WizCommand.BEDROOM_BRIGHTNESS_UP
-        case ButtonAction.long_button_4:
-            return WizCommand.BEDROOM_BRIGHTNESS_DOWN
-        
 wiz = Wiz()
 main_loop = None
 
 async def execute_action(action: ButtonAction):
-    command = map_action_to_command(action)
-    print(f"Received button action {action}. Executing command {command}")
+    binding = wiz.get_binding(action)
+    print(f"Received button action {action}. Executing {binding.label}")
+    if binding.is_empty:
+        return binding
+
     if wiz.debug:
         print("Bulbs state before command")
         await wiz.print_state()
 
-    await wiz.execute_command(command)
-    
+    if binding.command is not None:
+        await wiz.execute_command(binding.command)
+    else:
+        try:
+            await wiz.apply_scene(binding.room, binding.scene)
+        except KeyError as e:
+            print(f"Button {action} points at a scene that is gone: {e.args[0]}")
+
     if wiz.debug:
         print("Bulbs state after command")
         await wiz.print_state()
-    return command
+    return binding
 
 
 def on_connect(client, userdata, flags, reason_code, properties):
@@ -451,10 +537,10 @@ app = FastAPI(lifespan=lifespan)
 
 @app.post("/action")
 async def execute_command(item: ActionRequest):
-    command = await execute_action(item.action)
+    binding = await execute_action(item.action)
     return {
-        "message": "Command executed",
-        "command": command
+        "message": f"Executed {binding.label}",
+        "binding": binding.model_dump(exclude_none=True)
     }
 
 @app.post("/brightness_step")
@@ -472,6 +558,15 @@ def get_brightness_step():
         "command": wiz.brightness_step
     }
 
+@app.get("/", response_class=HTMLResponse)
+def ui():
+    return UI_FILE.read_text(encoding="utf-8")
+
+@app.get("/scene-names")
+def scene_names():
+    """Scene id -> name, so the ui can show 'Candlelight' instead of 29."""
+    return SCENES
+
 @app.get("/room")
 def list_rooms():
     return wiz.list_rooms()
@@ -481,21 +576,21 @@ def list_scenes(room: str):
     try:
         return wiz.list_scenes(room)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=e.args[0])
 
 @app.get("/room/{room}/scenes/{scene}")
 def get_scene(room: str, scene: str):
     try:
         return wiz.describe_scene(room, scene)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=e.args[0])
 
 @app.get("/room/{room}/scenes/{scene}/apply")
 async def apply_scene(room: str, scene: str):
     try:
         await wiz.apply_scene(room, scene)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=e.args[0])
 
     return {
         "message": f"Scene {room}/{scene} applied",
@@ -507,7 +602,7 @@ async def capture_scene(room: str, scene: str):
     try:
         await wiz.capture_scene(room, scene)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=e.args[0])
     except RuntimeError as e:
         raise HTTPException(status_code=504, detail=str(e))
 
@@ -516,12 +611,37 @@ async def capture_scene(room: str, scene: str):
         "scene": wiz.describe_scene(room, scene)
     }
 
+@app.get("/buttons")
+def list_bindings():
+    return wiz.list_bindings()
+
+@app.get("/buttons/{action}/default")
+def reset_binding(action: ButtonAction):
+    was_custom = wiz.reset_binding(action)
+    return {
+        "message": f"Button {action.value} reset to default" if was_custom else f"Button {action.value} was already the default",
+        "buttons": wiz.list_bindings()
+    }
+
+@app.post("/room/{room}/scenes/{scene}/button")
+def bind_scene(room: str, scene: str, item: ButtonRequest):
+    """Put the scene on a button action, or on none of them."""
+    try:
+        wiz.bind_scene(room, scene, item.action)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=e.args[0])
+
+    return {
+        "message": f"Scene {room}/{scene} is on {item.action.value}" if item.action else f"Scene {room}/{scene} is not on a button",
+        "scene": wiz.describe_scene(room, scene)
+    }
+
 @app.get("/room/{room}/scenes/{scene}/default")
 def reset_scene(room: str, scene: str):
     try:
         was_captured = wiz.reset_scene(room, scene)
     except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=e.args[0])
 
     return {
         "message": f"Scene {room}/{scene} reset to default" if was_captured else f"Scene {room}/{scene} was already the default",
