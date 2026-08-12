@@ -113,11 +113,11 @@ Each scene also has a dropdown of the sixteen button actions — pick one and th
 that button, with each option showing what it currently runs so you can see what you are taking
 over. Next to it, a **reset button** appears whenever the scene sits on a button you have changed,
 which undoes exactly that — handy right after putting a scene somewhere by mistake. At the bottom,
-a grid of all four buttons shows what every press does, with the same reset next to anything
-customised.
+a card per button lists its four presses and what each one does, with the same reset next to
+anything customised.
 
-Every button in the grid has a **▶** that fires that action through the same path a real press
-takes, so a binding can be tried without reaching for the remote.
+Every press has a **▶** that fires that action through the same path a real press takes, so a
+binding can be tried without reaching for the remote.
 
 Capture, reset, reset-button and delete all ask for confirmation first, naming what they are about
 to throw away; trigger and moving a scene onto a button just happen. Reset is greyed out while a

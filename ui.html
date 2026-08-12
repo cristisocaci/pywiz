@@ -75,12 +75,21 @@
     border: 1px solid var(--line); background: var(--bg); color: var(--text); min-width: 0;
   }
   select.bound { border-color: var(--accent); color: var(--accent); }
-  .buttons { width: 100%; border-collapse: collapse; font-size: .82rem; }
-  .buttons th { text-align: left; font-weight: 500; color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; }
-  .buttons td, .buttons th { padding: .35rem .4rem; border-bottom: 1px solid var(--line); }
-  .buttons td.target { color: var(--muted); }
-  .buttons td.target.custom { color: var(--accent); }
-  .buttons button { padding: .2rem .5rem; font-size: .72rem; min-height: 0; }
+  .button-card {
+    background: var(--card); border: 1px solid var(--line); border-radius: .8rem;
+    padding: .7rem .85rem; margin-bottom: .6rem;
+  }
+  .button-name { font-weight: 600; font-size: .85rem; margin-bottom: .2rem; }
+  .press { display: flex; align-items: center; gap: .6rem; padding: .38rem 0; border-top: 1px solid var(--line); }
+  .press-name {
+    flex: none; width: 3.4rem; color: var(--muted);
+    font-size: .68rem; text-transform: uppercase; letter-spacing: .06em;
+  }
+  .press .target { flex: 1; min-width: 0; font-size: .84rem; overflow-wrap: anywhere; }
+  .press .target.custom { color: var(--accent); }
+  .press .target.empty { color: var(--muted); opacity: .6; }
+  .press-actions { flex: none; display: flex; gap: .35rem; }
+  .press-actions button { padding: .28rem .55rem; font-size: .72rem; min-height: 2.1rem; min-width: 2.4rem; line-height: 1; }
   #toast {
     position: fixed; left: 1rem; right: 1rem; bottom: 1rem; padding: .7rem .9rem;
     border-radius: .6rem; background: var(--card); border: 1px solid var(--line);
@@ -173,7 +182,7 @@ function sceneCard(room, slug, scene) {
     </div>
     <div class="actions">
       <button class="primary" onclick="act('${room}', '${slug}', 'capture')">capture</button>
-      <button onclick="act('${room}', '${slug}', 'trigger')">trigger</button>
+      <button onclick="act('${room}', '${slug}', 'trigger')" title="trigger ${slug}">▶</button>
       ${scene.has_default
         ? `<button onclick="act('${room}', '${slug}', 'default')" ${scene.source === "captured" ? "" : "disabled"}>reset</button>`
         : `<button onclick="deleteScene('${room}', '${slug}')">delete</button>`}
@@ -183,25 +192,29 @@ function sceneCard(room, slug, scene) {
 
 function buttonsTable() {
   const rows = [1, 2, 3, 4].map(number => {
-    const cells = PRESSES.map(press => {
+    const presses = PRESSES.map(press => {
       const action = `${press}_button_${number}`;
       const button = buttons[action];
-      const trigger = button.label === "unassigned"
-        ? "" : ` <button onclick="triggerButton('${action}')" title="run ${button.label}">▶</button>`;
+      const unassigned = button.label === "unassigned";
+      const trigger = unassigned
+        ? "" : `<button onclick="triggerButton('${action}')" title="run ${button.label}">▶</button>`;
       const reset = button.source === "custom" && button.has_default
-        ? ` <button onclick="resetButton('${action}')">reset</button>` : "";
-      return `<td class="target ${button.source}">${button.label}${trigger}${reset}</td>`;
+        ? `<button onclick="resetButton('${action}')">reset</button>` : "";
+
+      return `<div class="press">
+        <span class="press-name">${press}</span>
+        <span class="target ${button.source} ${unassigned ? "empty" : ""}">${button.label}</span>
+        <span class="press-actions">${trigger}${reset}</span>
+      </div>`;
     });
-    return `<tr><th>${number}</th>${cells.join("")}</tr>`;
+
+    return `<div class="button-card">
+      <div class="button-name">button ${number}</div>
+      ${presses.join("")}
+    </div>`;
   });
 
-  return `<section>
-    <h2>buttons</h2>
-    <table class="buttons">
-      <tr><th></th>${PRESSES.map(p => `<th>${p}</th>`).join("")}</tr>
-      ${rows.join("")}
-    </table>
-  </section>`;
+  return `<section><h2>buttons</h2>${rows.join("")}</section>`;
 }
 
 async function load() {
