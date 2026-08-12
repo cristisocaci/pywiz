@@ -109,9 +109,9 @@ const actionLabel = action => {
   return `button ${number} · ${press}`;
 };
 
-async function api(path, payload) {
-  const options = payload === undefined ? {} : {
-    method: "POST",
+async function api(path, payload, method) {
+  const options = payload === undefined ? {method: method || "GET"} : {
+    method: method || "POST",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify(payload)
   };
@@ -173,8 +173,10 @@ function sceneCard(room, slug, scene) {
     </div>
     <div class="actions">
       <button class="primary" onclick="act('${room}', '${slug}', 'capture')">capture</button>
-      <button onclick="act('${room}', '${slug}', 'apply')">apply</button>
-      ${scene.has_default ? `<button onclick="act('${room}', '${slug}', 'default')" ${scene.source === "captured" ? "" : "disabled"}>reset</button>` : ""}
+      <button onclick="act('${room}', '${slug}', 'trigger')">trigger</button>
+      ${scene.has_default
+        ? `<button onclick="act('${room}', '${slug}', 'default')" ${scene.source === "captured" ? "" : "disabled"}>reset</button>`
+        : `<button onclick="deleteScene('${room}', '${slug}')">delete</button>`}
     </div>
   </div>`;
 }
@@ -184,9 +186,11 @@ function buttonsTable() {
     const cells = PRESSES.map(press => {
       const action = `${press}_button_${number}`;
       const button = buttons[action];
+      const trigger = button.label === "unassigned"
+        ? "" : ` <button onclick="triggerButton('${action}')" title="run ${button.label}">▶</button>`;
       const reset = button.source === "custom" && button.has_default
         ? ` <button onclick="resetButton('${action}')">reset</button>` : "";
-      return `<td class="target ${button.source}">${button.label}${reset}</td>`;
+      return `<td class="target ${button.source}">${button.label}${trigger}${reset}</td>`;
     });
     return `<tr><th>${number}</th>${cells.join("")}</tr>`;
   });
@@ -229,6 +233,27 @@ async function bind(room, slug, action) {
   await load();
 }
 
+async function triggerButton(action) {
+  try {
+    const res = await api("/action", {action});
+    toast(res.message);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+
+async function deleteScene(room, slug) {
+  if (!confirm(`Delete ${room}/${slug} for good?`)) return;
+
+  try {
+    const res = await api(`/room/${room}/scenes/${slug}`, undefined, "DELETE");
+    toast(res.message);
+  } catch (e) {
+    toast(e.message, true);
+  }
+  await load();
+}
+
 async function resetButton(action) {
   if (!confirm(`Put ${actionLabel(action)} back to its default, dropping "${buttons[action].label}"?`)) return;
 
@@ -248,12 +273,12 @@ async function act(room, slug, action, exists = true) {
               : `Save what the lights are doing now as ${room}/${slug}?`)
     : `Reset ${room}/${slug} to its default, dropping what you captured?`;
 
-  if (action !== "apply" && !confirm(question)) return;
+  if (action !== "trigger" && !confirm(question)) return;
 
   try {
     const res = await api(`/room/${room}/scenes/${slug}/${action}`);
     toast(res.message);
-    if (action !== "apply") await load();
+    if (action !== "trigger") await load();
   } catch (e) {
     toast(e.message, true);
   }

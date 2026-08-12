@@ -40,12 +40,13 @@ not the app.
 A scene is a room slug plus a scene slug, and holds one `BulbState` per bulb in that room:
 
 ```json
-{ "state": true, "scene": 29, "brightness": 117 }
+{ "state": true, "scene": 29, "brightness": 117, "speed": 100 }
 ```
 
 `brightness` is 0–255 (pywizlight's scale, not the bulb's 0–100 dimming). A state is either
-a `scene` id (a WiZ app mode such as Cozy or Candle), a `colortemp`, or a mix of
-`rgb` / `warm_white` / `cold_white` — capture picks whichever the bulb actually reports.
+a `scene` id (a WiZ app mode such as Cozy or Candle, with its `speed` if the bulb reports one),
+a `colortemp`, or a mix of `rgb` / `warm_white` / `cold_white` — capture picks whichever the bulb
+actually reports.
 
 The defaults live in `DEFAULT_SCENES` in `pywiz.py`:
 
@@ -63,9 +64,12 @@ capture and falls back to the code. `scenes.json` only ever holds captures, neve
 
 ### Capturing an app mode
 
-Dynamic WiZ modes (Candle, Cozy, Ocean…) report **only** a scene id and a dimming level — the bulb
-generates the color itself, so there is no rgb value to read while one is running. Capture stores
-the scene id, which reproduces the mode exactly on replay. Set the mode in the WiZ app, then:
+Dynamic WiZ modes (Candle, Cozy, Ocean…) report **only** a scene id, a dimming level and sometimes
+a speed — the bulb generates the color itself, so there is no rgb value to read while one is
+running. Capture stores the scene id, which reproduces the mode exactly on replay. Note that
+`dimming` caps the mode rather than describing how bright it looks: Candlelight at 100% is still a
+low warm flicker, so a captured `100%` that looks dim is correct, not a lost brightness value.
+Set the mode in the WiZ app, then:
 
 ```bash
 curl "http://localhost:7007/room/living/scenes/night-tv/capture"
@@ -101,7 +105,7 @@ Brightness steps are clamped to 26–255.
 ## UI
 
 `GET /` serves `ui.html`: every room with its scenes, what each bulb does in them, and a
-capture / apply / reset button per scene. The point is the phone — set a mode in the WiZ app,
+capture / trigger / reset button per scene. The point is the phone — set a mode in the WiZ app,
 switch to `http://<host>:7007/`, hit capture. The text box at the bottom of a room captures into
 a new scene, slugifying whatever you type ("Candle Test" → `candle-test`).
 
@@ -112,9 +116,12 @@ which undoes exactly that — handy right after putting a scene somewhere by mis
 a grid of all four buttons shows what every press does, with the same reset next to anything
 customised.
 
-Capture, reset and reset-button all ask for confirmation first, naming what they are about to
-throw away; apply and moving a scene onto a button just happen. Reset is greyed out while a scene
-is still the default.
+Every button in the grid has a **▶** that fires that action through the same path a real press
+takes, so a binding can be tried without reaching for the remote.
+
+Capture, reset, reset-button and delete all ask for confirmation first, naming what they are about
+to throw away; trigger and moving a scene onto a button just happen. Reset is greyed out while a
+scene is still the default, and scenes with no default show **delete** in its place.
 
 It is one static file with no build step and no dependencies, served straight off disk, so
 editing it and reloading the page is enough.
@@ -128,9 +135,10 @@ editing it and reloading the page is enough.
 | `GET /room` | rooms, their bulbs and scene slugs |
 | `GET /room/{room}/scenes` | scenes in a room, each marked `default` or `captured` |
 | `GET /room/{room}/scenes/{scene}` | the resolved scene definition |
-| `GET /room/{room}/scenes/{scene}/apply` | run the scene |
+| `GET /room/{room}/scenes/{scene}/trigger` | run the scene |
 | `GET /room/{room}/scenes/{scene}/capture` | snapshot the room's bulbs into the scene |
 | `GET /room/{room}/scenes/{scene}/default` | drop the capture, restore the hardcoded default |
+| `DELETE /room/{room}/scenes/{scene}` | delete a captured scene that has no default |
 | `POST /room/{room}/scenes/{scene}/button` | put the scene on a button, `{"action": "triple_button_1"}` or `{"action": null}` |
 | `GET /buttons` | every button action and what it runs |
 | `GET /buttons/{action}/default` | restore a button's default binding |

@@ -85,6 +85,7 @@ class BulbState(BaseModel):
     """What a single bulb should look like as part of a scene."""
     state: bool = True
     scene: int | None = None
+    speed: int | None = None
     brightness: int | None = None
     warm_white: int | None = None
     cold_white: int | None = None
@@ -102,7 +103,7 @@ class BulbState(BaseModel):
         # its sceneId and dimming - no rgb/warm/cold - so the mode is the state.
         scene = state.get_scene_id()
         if scene:
-            return cls(scene=scene, brightness=brightness)
+            return cls(scene=scene, brightness=brightness, speed=state.get_speed())
 
         colortemp = state.get_colortemp()
         if colortemp is not None:
@@ -118,6 +119,7 @@ class BulbState(BaseModel):
     def to_pilot(self):
         return PilotBuilder(
             scene=self.scene,
+            speed=self.speed,
             brightness=self.brightness,
             rgb=self.rgb,
             colortemp=self.colortemp,
@@ -367,6 +369,23 @@ class Wiz:
         save_scenes(self.captured_scenes)
         return captured
 
+    def delete_scene(self, room: str, slug: str):
+        """Drop a captured scene for good, and take it off any button it was on."""
+        self.room_bulbs(room)
+        if slug in DEFAULT_SCENES.get(room, {}):
+            raise ValueError(f"Scene '{room}/{slug}' is built in, reset it instead of deleting it")
+        if slug not in self.captured_scenes.get(room, {}):
+            raise KeyError(f"Unknown scene '{room}/{slug}'")
+
+        for action in ButtonAction:
+            binding = self.get_binding(action)
+            if binding.room == room and binding.scene == slug:
+                self._set_binding(action, Binding())
+
+        save_bindings(self.custom_bindings)
+        del self.captured_scenes[room][slug]
+        save_scenes(self.captured_scenes)
+
     def reset_scene(self, room: str, slug: str):
         """Drop the captured scene so the hardcoded default applies again."""
         self.room_bulbs(room)
@@ -388,6 +407,8 @@ class Wiz:
             params = {"state": True, "sceneId": state.scene}
             if state.brightness is not None:
                 params["dimming"] = max(10, hex_to_percent(state.brightness))
+            if state.speed is not None:
+                params["speed"] = state.speed
             await bulb.send({"method": "setPilot", "params": params})
             return
 
@@ -585,17 +606,28 @@ def get_scene(room: str, scene: str):
     except KeyError as e:
         raise HTTPException(status_code=404, detail=e.args[0])
 
-@app.get("/room/{room}/scenes/{scene}/apply")
-async def apply_scene(room: str, scene: str):
+@app.get("/room/{room}/scenes/{scene}/trigger")
+async def trigger_scene(room: str, scene: str):
     try:
         await wiz.apply_scene(room, scene)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=e.args[0])
 
     return {
-        "message": f"Scene {room}/{scene} applied",
+        "message": f"Scene {room}/{scene} triggered",
         "scene": wiz.describe_scene(room, scene)
     }
+
+@app.delete("/room/{room}/scenes/{scene}")
+def delete_scene(room: str, scene: str):
+    try:
+        wiz.delete_scene(room, scene)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=e.args[0])
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    return {"message": f"Scene {room}/{scene} deleted"}
 
 @app.get("/room/{room}/scenes/{scene}/capture")
 async def capture_scene(room: str, scene: str):
