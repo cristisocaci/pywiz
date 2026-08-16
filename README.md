@@ -102,6 +102,14 @@ the file rather than stored, so `bindings.json` only ever holds real differences
 Toggle uses the room as a whole: the living room turns off if *any* of its bulbs is on.
 Brightness steps are clamped to 26–255.
 
+## Bulbs that do not answer
+
+A bulb cut from power (switched off at the wall, or off the network) never replies, and pywizlight
+raises. Commands and triggers run the bulbs together and survive that: the ones that answer still
+get driven, the silent ones are logged and returned as `unreachable`, which the ui shows as
+"… (no answer from kitchen)". Capture is the exception — it refuses with a 504 rather than write a
+scene that is quietly missing a bulb.
+
 ## UI
 
 `GET /` serves `ui.html`: every room with its scenes, what each bulb does in them, and a

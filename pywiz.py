@@ -4,6 +4,7 @@ from enum import Enum
 from pathlib import Path
 from pywizlight import wizlight, PilotBuilder
 from pywizlight.bulb import PilotParser
+from pywizlight.exceptions import WizLightError
 from pywizlight.scenes import SCENES
 from pywizlight.utils import hex_to_percent
 from fastapi import FastAPI, HTTPException
@@ -218,6 +219,18 @@ def save_scenes(scenes):
     with SCENES_FILE.open("w", encoding="utf-8") as f:
         json.dump(raw, f, indent=2)
 
+async def gather_bulbs(names, calls):
+    """A bulb that is off at the wall never answers - that must not take the others down."""
+    results = await asyncio.gather(*calls, return_exceptions=True)
+
+    unreachable = []
+    for name, result in zip(names, results):
+        if isinstance(result, Exception):
+            unreachable.append(name)
+            print(f"Bulb '{name}' did not answer: {result!r}")
+
+    return unreachable
+
 class Wiz:
     _instance = None
 
@@ -348,21 +361,27 @@ class Wiz:
     async def apply_scene(self, room: str, slug: str):
         scene = self.get_scene(room, slug)
         bulbs = self.room_bulbs(room)
-        await asyncio.gather(*(
-            self._apply_bulb_state(bulbs[name], state)
-            for name, state in scene.items() if name in bulbs))
-        return scene
+        targets = [(name, state) for name, state in scene.items() if name in bulbs]
+
+        return await gather_bulbs(
+            [name for name, _ in targets],
+            [self._apply_bulb_state(bulbs[name], state) for name, state in targets])
 
     async def capture_scene(self, room: str, slug: str):
         """Store what the bulbs of a room are doing right now as the scene."""
         bulbs = self.room_bulbs(room)
         names = list(bulbs)
-        states = await asyncio.gather(*(bulbs[name].updateState() for name in names))
+        states = await asyncio.gather(
+            *(bulbs[name].updateState() for name in names), return_exceptions=True)
 
         captured = {}
+        silent = [name for name, state in zip(names, states)
+                  if state is None or isinstance(state, Exception)]
+        if silent:
+            # Capturing half a room would quietly write a scene that is missing bulbs.
+            raise RuntimeError(f"No response from {', '.join(silent)} - is it off at the wall?")
+
         for name, state in zip(names, states):
-            if state is None:
-                raise RuntimeError(f"No response from bulb '{name}'")
             captured[name] = BulbState.capture(state)
 
         self.captured_scenes.setdefault(room, {})[slug] = captured
@@ -415,32 +434,25 @@ class Wiz:
         await bulb.turn_on(state.to_pilot())
 
     async def execute_command(self, c: WizCommand):
+        living = list(self.living_bulbs)
+
         match c:
             case WizCommand.BEDROOM_TOGGLE:
-                await self._toggle_bulb(self.bedroom_light)
+                return await gather_bulbs(["bedroom"], [self._toggle_bulb(self.bedroom_light)])
             case WizCommand.BEDROOM_BRIGHTNESS_UP:
-                await self._modify_brightness(self.bedroom_light, self.brightness_step)
+                return await gather_bulbs(["bedroom"], [self._modify_brightness(self.bedroom_light, self.brightness_step)])
             case WizCommand.BEDROOM_BRIGHTNESS_DOWN:
-                await self._modify_brightness(self.bedroom_light, -self.brightness_step)
+                return await gather_bulbs(["bedroom"], [self._modify_brightness(self.bedroom_light, -self.brightness_step)])
             case WizCommand.LIVING_TOGGLE:
                 is_living_on = await self._is_living_on()
-                await asyncio.gather(
-                    self._toggle_bulb(self.kitchen_light, is_living_on),
-                    self._toggle_bulb(self.living_light, is_living_on),
-                    self._toggle_bulb(self.lamp_big, is_living_on),
-                    self._toggle_bulb(self.lamp_small, is_living_on))
+                return await gather_bulbs(living, [
+                    self._toggle_bulb(self.living_bulbs[name], is_living_on) for name in living])
             case WizCommand.LIVING_BRIGHTNESS_UP:
-                await asyncio.gather(
-                    self._modify_brightness(self.kitchen_light, self.brightness_step),
-                    self._modify_brightness(self.living_light, self.brightness_step), 
-                    self._modify_brightness(self.lamp_big, self.brightness_step),
-                    self._modify_brightness(self.lamp_small, self.brightness_step))
+                return await gather_bulbs(living, [
+                    self._modify_brightness(self.living_bulbs[name], self.brightness_step) for name in living])
             case WizCommand.LIVING_BRIGHTNESS_DOWN:
-                await asyncio.gather(
-                    self._modify_brightness(self.kitchen_light, -self.brightness_step),
-                    self._modify_brightness(self.living_light, -self.brightness_step),
-                    self._modify_brightness(self.lamp_big, -self.brightness_step),
-                    self._modify_brightness(self.lamp_small, -self.brightness_step))
+                return await gather_bulbs(living, [
+                    self._modify_brightness(self.living_bulbs[name], -self.brightness_step) for name in living])
 
     async def cleanup(self):
         for bulb_name in self.bulbs:
@@ -448,24 +460,40 @@ class Wiz:
             await bulb.async_close()
 
     async def _toggle_bulb(self, bulb: wizlight, is_on: bool | None = None):
-        state = (await bulb.updateState()).get_state() if is_on is None else is_on
-        if state:
+        if is_on is None:
+            state = await bulb.updateState()
+            if state is None:
+                return
+            is_on = state.get_state()
+
+        if is_on:
             await bulb.turn_off()
         else:
             await bulb.turn_on(PilotBuilder(warm_white=255, brightness=255))
-    
+
     async def _is_living_on(self):
         for bulb_name in self.living_bulbs:
             bulb = self.living_bulbs[bulb_name]
-            state = await bulb.updateState()
-            if state.get_state():
+            try:
+                state = await bulb.updateState()
+            except WizLightError as e:
+                print(f"Bulb '{bulb_name}' did not answer: {e!r}")
+                continue
+
+            if state is not None and state.get_state():
                 return True
-            
+
         return False
-               
+
     async def _modify_brightness(self, bulb: wizlight, step: int, min = 26, max = 255):
         state = await bulb.updateState()
+        if state is None:
+            return
+
         brightness = state.get_brightness()
+        if brightness is None:
+            return
+
         new_brightness = brightness + step
         if new_brightness < min:
             new_brightness = min
@@ -480,7 +508,16 @@ class Wiz:
         
         for bulb_name in self.bulbs:
             bulb = self.bulbs[bulb_name]
-            state = await bulb.updateState()
+            try:
+                state = await bulb.updateState()
+            except WizLightError as e:
+                print(f"{bulb_name} did not answer: {e!r}")
+                continue
+
+            if state is None:
+                print(f"{bulb_name} did not answer")
+                continue
+
             on_off = "on" if state.get_state() else "off"
             scene = state.get_scene() or state.get_scene_id()
             print(f"{bulb_name} is {on_off}. brightness {state.get_brightness()}; scene {scene}; warm {state.get_warm_white()}; cold {state.get_cold_white()}; rgb {state.get_rgb()}; colortemp {state.get_colortemp()}")
@@ -492,24 +529,28 @@ async def execute_action(action: ButtonAction):
     binding = wiz.get_binding(action)
     print(f"Received button action {action}. Executing {binding.label}")
     if binding.is_empty:
-        return binding
+        return binding, []
 
     if wiz.debug:
         print("Bulbs state before command")
         await wiz.print_state()
 
+    unreachable = []
     if binding.command is not None:
-        await wiz.execute_command(binding.command)
+        unreachable = await wiz.execute_command(binding.command)
     else:
         try:
-            await wiz.apply_scene(binding.room, binding.scene)
+            unreachable = await wiz.apply_scene(binding.room, binding.scene)
         except KeyError as e:
             print(f"Button {action} points at a scene that is gone: {e.args[0]}")
 
     if wiz.debug:
         print("Bulbs state after command")
         await wiz.print_state()
-    return binding
+    return binding, unreachable
+
+def with_unreachable(message: str, unreachable):
+    return f"{message} (no answer from {', '.join(unreachable)})" if unreachable else message
 
 
 def on_connect(client, userdata, flags, reason_code, properties):
@@ -558,10 +599,11 @@ app = FastAPI(lifespan=lifespan)
 
 @app.post("/action")
 async def execute_command(item: ActionRequest):
-    binding = await execute_action(item.action)
+    binding, unreachable = await execute_action(item.action)
     return {
-        "message": f"Executed {binding.label}",
-        "binding": binding.model_dump(exclude_none=True)
+        "message": with_unreachable(f"Executed {binding.label}", unreachable),
+        "binding": binding.model_dump(exclude_none=True),
+        "unreachable": unreachable
     }
 
 @app.post("/brightness_step")
@@ -609,13 +651,14 @@ def get_scene(room: str, scene: str):
 @app.get("/room/{room}/scenes/{scene}/trigger")
 async def trigger_scene(room: str, scene: str):
     try:
-        await wiz.apply_scene(room, scene)
+        unreachable = await wiz.apply_scene(room, scene)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=e.args[0])
 
     return {
-        "message": f"Scene {room}/{scene} triggered",
-        "scene": wiz.describe_scene(room, scene)
+        "message": with_unreachable(f"Scene {room}/{scene} triggered", unreachable),
+        "scene": wiz.describe_scene(room, scene),
+        "unreachable": unreachable
     }
 
 @app.delete("/room/{room}/scenes/{scene}")
