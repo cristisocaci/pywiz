@@ -90,6 +90,19 @@
   .press .target.empty { color: var(--muted); opacity: .6; }
   .press-actions { flex: none; display: flex; gap: .35rem; }
   .press-actions button { padding: .28rem .55rem; font-size: .72rem; min-height: 2.1rem; min-width: 2.4rem; line-height: 1; }
+  .timing { background: var(--card); border: 1px solid var(--line); border-radius: .8rem; margin-bottom: .45rem; }
+  .timing summary { display: flex; gap: .6rem; align-items: baseline; padding: .6rem .85rem; cursor: pointer; list-style: none; }
+  .timing summary::-webkit-details-marker { display: none; }
+  .timing .when { flex: none; color: var(--muted); font-size: .75rem; font-variant-numeric: tabular-nums; }
+  .timing .what { flex: 1; min-width: 0; font-size: .84rem; }
+  .timing .verdict { display: block; color: var(--muted); font-size: .75rem; overflow-wrap: anywhere; }
+  .timing .total { flex: none; font-weight: 600; font-size: .84rem; font-variant-numeric: tabular-nums; }
+  .timing .total.slow { color: var(--accent); }
+  .timing .total.very-slow { color: #ff8b7d; }
+  .timing-detail { padding: 0 .85rem .7rem; font-size: .78rem; color: var(--muted); }
+  .timing-detail div { display: flex; justify-content: space-between; gap: 1rem; padding: .1rem 0; font-variant-numeric: tabular-nums; }
+  .timing-detail b { font-weight: 500; color: var(--text); }
+  .timing-detail .failed b { color: #ff8b7d; }
   #toast {
     position: fixed; left: 1rem; right: 1rem; bottom: 1rem; padding: .7rem .9rem;
     border-radius: .6rem; background: var(--card); border: 1px solid var(--line);
@@ -217,6 +230,42 @@ function buttonsTable() {
   return `<section><h2>buttons</h2>${rows.join("")}</section>`;
 }
 
+// A press is "slow" past what a human notices, "very slow" past what they complain about.
+const SLOW_MS = 500, VERY_SLOW_MS = 2000;
+
+function timingRow(t) {
+  const when = t.at.slice(11, 19);
+  const name = t.action.includes("_button_") ? actionLabel(t.action) : t.action;
+  const totalClass = t.total_ms >= VERY_SLOW_MS ? "very-slow" : t.total_ms >= SLOW_MS ? "slow" : "";
+  const line = (label, value) => value == null ? "" : `<div><span>${label}</span><b>${value}</b></div>`;
+  const requests = t.requests.map(r => `<div class="${r.error ? "failed" : ""}">
+      <span>+${r.at_ms}ms ${r.bulb} ${r.method}</span>
+      <b>${r.ms}ms${r.datagrams > 1 ? ` · ${r.datagrams} datagrams` : ""}${r.error ? " · no answer" : ""}</b>
+    </div>`).join("");
+
+  return `<details class="timing">
+    <summary>
+      <span class="when">${when}</span>
+      <span class="what">${name} · ${t.source}<span class="verdict">${t.verdict}</span></span>
+      <span class="total ${totalClass}">${t.total_ms}ms</span>
+    </summary>
+    <div class="timing-detail">
+      ${line("runs", t.label)}
+      ${line("clap pattern", t.pattern_ms != null ? `${t.pattern_ms}ms` : null)}
+      ${line("sender → pywiz", t.upstream_ms != null ? `${t.upstream_ms}ms` : null)}
+      ${line("zigbee link quality", t.linkquality)}
+      ${line("wait for event loop", `${t.queue_ms}ms`)}
+      ${requests}
+    </div>
+  </details>`;
+}
+
+async function timingsSection() {
+  const presses = await api("/timings?limit=30");
+  const rows = presses.length ? presses.map(timingRow).join("") : `<p class="bulbs">no presses yet</p>`;
+  return `<section><h2>recent presses · tap for where the time went</h2>${rows}</section>`;
+}
+
 async function load() {
   buttons = await api("/buttons");
   const rooms = await api("/room");
@@ -233,7 +282,7 @@ async function load() {
     </section>`;
   }));
 
-  document.getElementById("rooms").innerHTML = sections.join("") + buttonsTable();
+  document.getElementById("rooms").innerHTML = sections.join("") + buttonsTable() + await timingsSection();
 }
 
 async function bind(room, slug, action) {

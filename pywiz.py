@@ -14,7 +14,12 @@ from contextlib import asynccontextmanager
 import paho.mqtt.client as mqtt
 import os
 import json
+import time
 import pywizlight.bulb as wizlight_bulb
+from collections import deque
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from datetime import datetime
 
 # pywizlight resends a lost datagram only at 0.75s, 2.25s, 5.25s, 8.25s and waits 13s for an
 # answer, so one dropped packet costs a button press 0.75s and three cost 5s - and a bulb that is
@@ -25,9 +30,190 @@ wizlight_bulb.MAX_BACKOFF = 0.5
 wizlight_bulb.MAX_SEND_DATAGRAMS = 12
 wizlight_bulb.TIMEOUT = 4
 
+# What the current log lines belong to ("single_button_1", "scene living/cooking"), and the
+# timing record of the press being run. asyncio copies both into every task, so the bulb calls
+# of one press all log under its name and land in its record.
+current_action: ContextVar[str] = ContextVar("current_action", default="-")
+current_press: ContextVar["Press | None"] = ContextVar("current_press", default=None)
+
+def log(message):
+    """Timestamped and flushed - stdout to a file is block-buffered, so plain prints show up late."""
+    stamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    print(f"{stamp} [{current_action.get()}] {message}", flush=True)
+
+def ms_since(start):
+    return f"{(time.monotonic() - start) * 1000:.0f}ms"
+
+def datagrams_sent(elapsed):
+    """How many datagrams pywizlight had sent when the answer came, worked out from its schedule.
+    More than one means the bulb missed a packet and the press paid for a retransmit."""
+    sent, at, wait = 1, 0.0, wizlight_bulb.FIRST_SEND_INTERVAL
+    while sent < wizlight_bulb.MAX_SEND_DATAGRAMS and at + wait <= elapsed:
+        at += wait
+        sent += 1
+        wait = min(wait * 2, wizlight_bulb.MAX_BACKOFF)
+    return sent
+
+class TimedWizlight(wizlight):
+    """A wizlight that logs how long every request to the bulb took, and adds it to the press."""
+
+    def __init__(self, name: str, ip: str):
+        super().__init__(ip)
+        self.name = name
+
+    async def send(self, msg_dict):
+        start = time.monotonic()
+        method = msg_dict.get("method")
+        error = None
+        try:
+            return await super().send(msg_dict)
+        except Exception as e:
+            error = repr(e)
+            raise
+        finally:
+            elapsed = time.monotonic() - start
+            datagrams = datagrams_sent(elapsed)
+            if error:
+                log(f"{self.name} {method} failed after {elapsed * 1000:.0f}ms: {error}")
+            else:
+                log(f"{self.name} {method} {elapsed * 1000:.0f}ms, ~{datagrams} datagram(s)")
+
+            press = current_press.get()
+            if press is not None:
+                press.add_request(self.name, method, start, elapsed, datagrams, error)
+
+@dataclass
+class Receipt:
+    """When a press reached pywiz, and what the sender said about its own side of the trip."""
+    source: str                       # "zigbee", "clap" or "http"
+    mono: float = field(default_factory=time.monotonic)
+    wall: float = field(default_factory=time.time)
+    upstream_ms: int | None = None    # sender's timestamp -> MQTT delivered it here
+    pattern_ms: int | None = None     # clap only: first clap -> pattern recognised
+    linkquality: int | None = None    # zigbee only: the button's radio signal, 0-255
+
+    @classmethod
+    def from_payload(cls, payload: dict):
+        receipt = cls(source=payload.get("source", "zigbee"),
+                      pattern_ms=payload.get("pattern_ms"),
+                      linkquality=payload.get("linkquality"))
+        sent = sender_time(payload)
+        if sent is not None:
+            receipt.upstream_ms = round((receipt.wall - sent) * 1000)
+        return receipt
+
+def sender_time(payload: dict):
+    """Epoch seconds the sender stamped the press with - clap-clap's `sent_at`, or zigbee2mqtt's
+    `last_seen` (when z2m heard the button), which z2m only adds with advanced.last_seen set."""
+    if "sent_at" in payload:
+        return float(payload["sent_at"])
+
+    last_seen = payload.get("last_seen")
+    if isinstance(last_seen, (int, float)):
+        return last_seen / 1000
+    if isinstance(last_seen, str):
+        try:
+            return datetime.fromisoformat(last_seen.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+class Press:
+    """The timing record of one press, from the moment it reached pywiz to the last bulb answer."""
+
+    def __init__(self, name: str, receipt: Receipt):
+        self.receipt = receipt
+        self.started = time.monotonic()
+        self.record = {
+            "at": datetime.fromtimestamp(receipt.wall).isoformat(timespec="milliseconds"),
+            "source": receipt.source,
+            "action": name,
+            "upstream_ms": receipt.upstream_ms,
+            "pattern_ms": receipt.pattern_ms,
+            "linkquality": receipt.linkquality,
+            "queue_ms": round((self.started - receipt.mono) * 1000),
+            "requests": [],
+        }
+
+    def add_request(self, bulb, method, start, elapsed, datagrams, error):
+        self.record["requests"].append({
+            "bulb": bulb,
+            "method": method,
+            "at_ms": round((start - self.started) * 1000),
+            "ms": round(elapsed * 1000),
+            "datagrams": datagrams,
+            **({"error": error} if error else {}),
+        })
+
+    def finish(self, label: str, unreachable):
+        self.record["label"] = label
+        self.record["unreachable"] = unreachable
+        self.record["total_ms"] = round((time.monotonic() - self.receipt.mono) * 1000)
+        self.record["verdict"] = verdict(self.record)
+        timings.add(self.record)
+        log(f"done in {self.record['total_ms']}ms - {self.record['verdict']}")
+
+def verdict(record):
+    """One line on where the time went, so a slow press explains itself in the history."""
+    requests = record["requests"]
+    if record["unreachable"]:
+        return f"no answer from {', '.join(record['unreachable'])}"
+
+    retried = [r for r in requests if r["datagrams"] > 1]
+    if retried:
+        worst = max(retried, key=lambda r: r["ms"])
+        return (f"{worst['bulb']} missed {worst['datagrams'] - 1} packet(s), "
+                f"its {worst['method']} took {worst['ms']}ms")
+
+    if (record["upstream_ms"] or 0) > 300:
+        return f"{record['source']} -> pywiz took {record['upstream_ms']}ms"
+    if record["queue_ms"] > 100:
+        return f"waited {record['queue_ms']}ms for the event loop"
+    if requests:
+        slowest = max(requests, key=lambda r: r["ms"])
+        return f"slowest step {slowest['bulb']} {slowest['method']} {slowest['ms']}ms"
+    return "no bulb calls"
+
+class TimingHistory:
+    """The last presses with their timings, kept across restarts in timings.jsonl."""
+
+    def __init__(self, path: Path, keep: int = 500):
+        self.path = path
+        self.keep = keep
+        self.records = deque(maxlen=keep)
+        self.appended = 0
+
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    self.records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            self._rewrite()
+
+    def _rewrite(self):
+        with self.path.open("w", encoding="utf-8") as f:
+            f.writelines(json.dumps(record) + "\n" for record in self.records)
+
+    def add(self, record):
+        self.records.append(record)
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+
+        # Appending is cheap; trim the file back to `keep` lines every `keep` presses.
+        self.appended += 1
+        if self.appended >= self.keep:
+            self._rewrite()
+            self.appended = 0
+
+    def recent(self, limit: int, slower_than: int = 0):
+        matching = [r for r in reversed(self.records) if r.get("total_ms", 0) >= slower_than]
+        return matching[:limit]
+
 SCENES_FILE = Path(__file__).with_name("scenes.json")
 BINDINGS_FILE = Path(__file__).with_name("bindings.json")
 UI_FILE = Path(__file__).with_name("ui.html")
+TIMINGS_FILE = Path(__file__).with_name("timings.jsonl")
 
 class WizCommand(str, Enum):
     """Everything a button can do that is not a scene."""
@@ -237,7 +423,7 @@ async def gather_bulbs(names, calls):
     for name, result in zip(names, results):
         if isinstance(result, Exception):
             unreachable.append(name)
-            print(f"Bulb '{name}' did not answer: {result!r}")
+            log(f"Bulb '{name}' did not answer: {result!r}")
 
     return unreachable
 
@@ -251,11 +437,11 @@ class Wiz:
 
     def __init__(self):
         self.debug = False
-        self.kitchen_light = wizlight("192.168.1.129")
-        self.living_light = wizlight("192.168.1.130")
-        self.bedroom_light = wizlight("192.168.1.135")  
-        self.lamp_big = wizlight("192.168.1.254")
-        self.lamp_small = wizlight("192.168.1.142")
+        self.kitchen_light = TimedWizlight("kitchen", "192.168.1.129")
+        self.living_light = TimedWizlight("living", "192.168.1.130")
+        self.bedroom_light = TimedWizlight("bedroom", "192.168.1.135")
+        self.lamp_big = TimedWizlight("lamp_big", "192.168.1.254")
+        self.lamp_small = TimedWizlight("lamp_small", "192.168.1.142")
 
         self.brightness_step = 75
 
@@ -483,6 +669,7 @@ class Wiz:
 
     async def _is_living_on(self):
         """Ask every bulb at once - one by one, an all-off room costs four round trips in a row."""
+        start = time.monotonic()
         names = list(self.living_bulbs)
         states = await asyncio.gather(
             *(self.living_bulbs[name].updateState() for name in names), return_exceptions=True)
@@ -490,10 +677,11 @@ class Wiz:
         is_on = False
         for name, state in zip(names, states):
             if isinstance(state, Exception):
-                print(f"Bulb '{name}' did not answer: {state!r}")
+                log(f"Bulb '{name}' did not answer: {state!r}")
             elif state is not None and state.get_state():
                 is_on = True
 
+        log(f"living is {'on' if is_on else 'off'}, state check took {ms_since(start)}")
         return is_on
 
     async def _modify_brightness(self, bulb: wizlight, step: int, min = 26, max = 255):
@@ -516,34 +704,50 @@ class Wiz:
     async def print_state(self):
         if not self.debug:
             return
-        
+
+        # The dump is not part of the press it brackets - keep its getPilots out of the timings.
+        token = current_press.set(None)
+        try:
+            await self._print_state()
+        finally:
+            current_press.reset(token)
+
+    async def _print_state(self):
         for bulb_name in self.bulbs:
             bulb = self.bulbs[bulb_name]
             try:
                 state = await bulb.updateState()
             except WizLightError as e:
-                print(f"{bulb_name} did not answer: {e!r}")
+                log(f"{bulb_name} did not answer: {e!r}")
                 continue
 
             if state is None:
-                print(f"{bulb_name} did not answer")
+                log(f"{bulb_name} did not answer")
                 continue
 
             on_off = "on" if state.get_state() else "off"
             scene = state.get_scene() or state.get_scene_id()
-            print(f"{bulb_name} is {on_off}. brightness {state.get_brightness()}; scene {scene}; warm {state.get_warm_white()}; cold {state.get_cold_white()}; rgb {state.get_rgb()}; colortemp {state.get_colortemp()}")
+            log(f"{bulb_name} is {on_off}. brightness {state.get_brightness()}; scene {scene}; warm {state.get_warm_white()}; cold {state.get_cold_white()}; rgb {state.get_rgb()}; colortemp {state.get_colortemp()}")
 
 wiz = Wiz()
+timings = TimingHistory(TIMINGS_FILE)
 main_loop = None
 
-async def execute_action(action: ButtonAction):
+async def execute_action(action: ButtonAction, receipt: Receipt):
+    """Run a button action, timing every step from `receipt` - when the press reached us."""
+    current_action.set(action.value)
+    press = Press(action.value, receipt)
+    current_press.set(press)
     binding = wiz.get_binding(action)
-    print(f"Received button action {action}. Executing {binding.label}")
+    upstream = f", {receipt.upstream_ms}ms from sender" if receipt.upstream_ms is not None else ""
+    log(f"{receipt.source} press, executing {binding.label} "
+        f"(started {press.record['queue_ms']}ms after receipt{upstream})")
     if binding.is_empty:
+        press.finish(binding.label, [])
         return binding, []
 
     if wiz.debug:
-        print("Bulbs state before command")
+        log("Bulbs state before command")
         await wiz.print_state()
 
     unreachable = []
@@ -553,10 +757,12 @@ async def execute_action(action: ButtonAction):
         try:
             unreachable = await wiz.apply_scene(binding.room, binding.scene)
         except KeyError as e:
-            print(f"Button {action} points at a scene that is gone: {e.args[0]}")
+            log(f"Button {action} points at a scene that is gone: {e.args[0]}")
+
+    press.finish(binding.label, unreachable)
 
     if wiz.debug:
-        print("Bulbs state after command")
+        log("Bulbs state after command")
         await wiz.print_state()
     return binding, unreachable
 
@@ -565,22 +771,23 @@ def with_unreachable(message: str, unreachable):
 
 
 def on_connect(client, userdata, flags, reason_code, properties):
-    print(f"Connected with result code {reason_code}")
+    log(f"MQTT connected with result code {reason_code}")
     client.subscribe("zigbee2mqtt/button")
 
 def on_message(client, userdata, msg):
-    print(f"Received message on topic {msg.topic}: {msg.payload.decode()}")
+    log(f"MQTT message on {msg.topic}: {msg.payload.decode()}")
     try:
-            payload = json.loads(msg.payload.decode('utf-8'))    
-            action = payload["action"]
+        payload = json.loads(msg.payload.decode('utf-8'))
+        action = ButtonAction(payload["action"])
+        receipt = Receipt.from_payload(payload)
 
-            asyncio.run_coroutine_threadsafe(execute_action(ButtonAction(action)), main_loop)
+        asyncio.run_coroutine_threadsafe(execute_action(action, receipt), main_loop)
     except (json.JSONDecodeError, KeyError, ValueError) as e:
-        print(f"Error processing message: {e}")
+        log(f"Error processing message: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("App starting...")
+    log("App starting...")
     global main_loop
     main_loop = asyncio.get_running_loop()
 
@@ -603,14 +810,14 @@ async def lifespan(app: FastAPI):
     app.state.mqtt_client.loop_stop()
     app.state.mqtt_client.disconnect()
     await wiz.cleanup()
-    print("App shutdown complete")
+    log("App shutdown complete")
 
 
 app = FastAPI(lifespan=lifespan)
 
 @app.post("/action")
 async def execute_command(item: ActionRequest):
-    binding, unreachable = await execute_action(item.action)
+    binding, unreachable = await execute_action(item.action, Receipt(source="http"))
     return {
         "message": with_unreachable(f"Executed {binding.label}", unreachable),
         "binding": binding.model_dump(exclude_none=True),
@@ -661,10 +868,15 @@ def get_scene(room: str, scene: str):
 
 @app.get("/room/{room}/scenes/{scene}/trigger")
 async def trigger_scene(room: str, scene: str):
+    name = f"scene {room}/{scene}"
+    current_action.set(name)
+    press = Press(name, Receipt(source="http"))
+    current_press.set(press)
     try:
         unreachable = await wiz.apply_scene(room, scene)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=e.args[0])
+    press.finish(f"{room}/{scene}", unreachable)
 
     return {
         "message": with_unreachable(f"Scene {room}/{scene} triggered", unreachable),
@@ -733,6 +945,11 @@ def reset_scene(room: str, scene: str):
         "message": f"Scene {room}/{scene} reset to default" if was_captured else f"Scene {room}/{scene} was already the default",
         "scene": wiz.describe_scene(room, scene)
     }
+
+@app.get("/timings")
+def recent_timings(limit: int = 50, slower_than: int = 0):
+    """The last presses, newest first, with where the time went. `slower_than` is in ms."""
+    return timings.recent(limit, slower_than)
 
 @app.get("/debug")
 def toggle_debug():

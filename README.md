@@ -59,8 +59,8 @@ rc-service pywiz restart
 echo "✔ Code updated"
 ```
 
-`scenes.json` and `bindings.json` are git-ignored, so a pull never touches captured scenes or
-rebound buttons. Check it came back with `curl -s http://192.168.1.105:7007/room`.
+`scenes.json`, `bindings.json` and `timings.jsonl` are git-ignored, so a pull never touches
+captured scenes, rebound buttons or the press history. Check it came back with `curl -s http://192.168.1.105:7007/room`.
 
 ## Rooms and bulbs
 
@@ -146,6 +146,102 @@ get driven, the silent ones are logged and returned as `unreachable`, which the 
 "… (no answer from kitchen)". Capture is the exception — it refuses with a 504 rather than write a
 scene that is quietly missing a bulb.
 
+## Why was that press slow?
+
+Slow presses come and go, so every press is timed and kept: the last 500 live in
+`timings.jsonl` next to `pywiz.py` (survives restarts), and the ui lists the newest 30 under
+**recent presses** — tap one to see where its time went. Right after a slow press, open the ui
+on your phone, or:
+
+```bash
+curl -s "http://192.168.1.105:7007/timings?slower_than=1000&limit=10"
+```
+
+### The path a press takes
+
+```
+button ──zigbee──▶ CC2531 ─▶ zigbee2mqtt ─┐
+                                          ├─MQTT─▶ pywiz ─UDP─▶ bulbs
+clap ─────wifi────────────────────────────┘
+```
+
+| step | field | how it is measured |
+|---|---|---|
+| clap pattern | `pattern_ms` | clap-clap: first clap → pattern recognised. This is just how long your claps took, not lag |
+| button deciding single/double | — | **not measurable.** The button waits after a release to see if a second press follows; up to ~1 s, inside the device |
+| sender → pywiz | `upstream_ms` | clap: board's NTP clock at publish → pywiz receives it. Button: zigbee2mqtt's `last_seen` (when z2m heard the button) → pywiz receives it. Needs z2m set up, see below |
+| radio | `linkquality` | the button's Zigbee signal as z2m reports it, 0–255; low values mean retries on the radio |
+| wait for event loop | `queue_ms` | MQTT thread hands the press over → it starts running. Should be ~0 |
+| each bulb request | `requests[]` | every `getPilot` / `setPilot`: when it started (`at_ms`, from the start of the press), how long it took (`ms`), and how many datagrams pywizlight had sent by then (`datagrams`) |
+| total | `total_ms` | pywiz received the press → last bulb answered. Does **not** include `upstream_ms` |
+
+`verdict` is a one-line guess at the culprit, in this order: a bulb that never answered → a bulb
+that needed retransmits → a slow sender → a busy event loop → otherwise just the slowest step.
+
+### Reading a record
+
+```json
+{
+  "at": "2026-10-09T23:41:07.512", "source": "zigbee", "action": "single_button_1",
+  "label": "living toggle", "upstream_ms": 31, "linkquality": 87, "queue_ms": 0,
+  "requests": [
+    {"bulb": "kitchen",    "method": "getPilot", "at_ms": 0,   "ms": 18,   "datagrams": 1},
+    {"bulb": "lamp_small", "method": "getPilot", "at_ms": 1,   "ms": 1640, "datagrams": 5},
+    {"bulb": "kitchen",    "method": "setPilot", "at_ms": 1642,"ms": 21,   "datagrams": 1}
+  ],
+  "unreachable": [], "total_ms": 1690,
+  "verdict": "lamp_small missed 4 packet(s), its getPilot took 1640ms"
+}
+```
+
+Read it left to right along the path: the button reached pywiz in 31 ms with a fine signal, the
+press started at once, then the toggle had to know if the room was on and `lamp_small` took
+1.6 s to answer — the `setPilot`s could only go out after that (`at_ms` 1642). That is the bulb's
+Wi-Fi, not the button or MQTT.
+
+What the patterns usually mean:
+
+- **`datagrams` > 1 on a bulb** — it missed packets; the bulb's Wi-Fi was asleep or the signal is
+  weak. Usually the first press after the lights sat idle. `getPilot` costs come before any
+  `setPilot` can go out on toggles and brightness steps.
+- **an `error` / `unreachable` bulb** — no answer within 4 s: off at the wall, or off the network.
+- **high `upstream_ms`** — the delay is before pywiz: z2m or the radio for the button (check
+  `linkquality`), Wi-Fi or MQTT for clap-clap. Small negative or off-by-tens values are just the
+  two clocks disagreeing.
+- **fast `total_ms` but it still felt slow** — the time went where nothing can see it: the
+  button's single/double wait, or the bulb's own fade-in.
+- **a clap that never shows up** — the board's telnet log says `MQTT publish FAILED` when it
+  dropped the press because MQTT was down.
+
+The same steps also go to the uvicorn log, one timestamped line each, tagged with the press:
+
+```
+23:41:07.512 [single_button_1] zigbee press, executing living toggle (started 0ms after receipt, 31ms from sender)
+23:41:09.152 [single_button_1] lamp_small getPilot 1640ms, ~5 datagram(s)
+23:41:09.202 [single_button_1] done in 1690ms - lamp_small missed 4 packet(s), its getPilot took 1640ms
+```
+
+### zigbee2mqtt: turn on `last_seen`
+
+Button presses only get `upstream_ms` when z2m stamps its messages. In the z2m frontend
+(`http://192.168.1.105:8080`) → Settings → Settings → Advanced → **Last seen**, pick `epoch`
+(or `ISO_8601`, both work), or in z2m's `configuration.yaml`:
+
+```yaml
+advanced:
+  last_seen: epoch
+```
+
+While you are in there, check the button's own settings page has no **debounce** set — that
+holds every press back on purpose.
+
+### Retries
+
+pywizlight on its own resends an unanswered datagram at 0.75 s, 2.25 s, 5.25 s… and waits 13 s.
+pywiz overrides that at the top of `pywiz.py` to resend at 0.2 s, 0.6 s, 1.1 s and every 0.5 s
+after, giving up after 4 s. `datagrams` is worked out from that schedule and the time the answer
+took, so it is the number sent by then, not a count off the wire.
+
 ## UI
 
 `GET /` serves `ui.html`: every room with its scenes, what each bulb does in them, and a
@@ -188,5 +284,6 @@ editing it and reloading the page is enough.
 | `GET /buttons/{action}/default` | restore a button's default binding |
 | `POST /action` | run a button action, e.g. `{"action": "single_button_1"}` |
 | `GET` / `POST /brightness_step` | read or set the brightness step (default 75, resets on restart) |
+| `GET /timings?limit=50&slower_than=0` | the last presses, newest first, with where the time went (`slower_than` in ms) |
 | `GET /debug` | toggle bulb-state logging before and after each command |
 
