@@ -14,6 +14,16 @@ from contextlib import asynccontextmanager
 import paho.mqtt.client as mqtt
 import os
 import json
+import pywizlight.bulb as wizlight_bulb
+
+# pywizlight resends a lost datagram only at 0.75s, 2.25s, 5.25s, 8.25s and waits 13s for an
+# answer, so one dropped packet costs a button press 0.75s and three cost 5s - and a bulb that is
+# off at the wall stalls everything waiting on it for 13s. getPilot / setPilot are idempotent,
+# so resend early and often, and give up on a silent bulb sooner. Read at call time, so this works.
+wizlight_bulb.FIRST_SEND_INTERVAL = 0.2
+wizlight_bulb.MAX_BACKOFF = 0.5
+wizlight_bulb.MAX_SEND_DATAGRAMS = 12
+wizlight_bulb.TIMEOUT = 4
 
 SCENES_FILE = Path(__file__).with_name("scenes.json")
 BINDINGS_FILE = Path(__file__).with_name("bindings.json")
@@ -472,18 +482,19 @@ class Wiz:
             await bulb.turn_on(PilotBuilder(warm_white=255, brightness=255))
 
     async def _is_living_on(self):
-        for bulb_name in self.living_bulbs:
-            bulb = self.living_bulbs[bulb_name]
-            try:
-                state = await bulb.updateState()
-            except WizLightError as e:
-                print(f"Bulb '{bulb_name}' did not answer: {e!r}")
-                continue
+        """Ask every bulb at once - one by one, an all-off room costs four round trips in a row."""
+        names = list(self.living_bulbs)
+        states = await asyncio.gather(
+            *(self.living_bulbs[name].updateState() for name in names), return_exceptions=True)
 
-            if state is not None and state.get_state():
-                return True
+        is_on = False
+        for name, state in zip(names, states):
+            if isinstance(state, Exception):
+                print(f"Bulb '{name}' did not answer: {state!r}")
+            elif state is not None and state.get_state():
+                is_on = True
 
-        return False
+        return is_on
 
     async def _modify_brightness(self, bulb: wizlight, step: int, min = 26, max = 255):
         state = await bulb.updateState()
