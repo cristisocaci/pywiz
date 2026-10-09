@@ -26,6 +26,42 @@ static leases for this to keep working.
 Running `python pywiz.py` directly just toggles the living room and exits; it is a smoke test,
 not the app.
 
+## Deploying
+
+It runs in CT 105 (`192.168.1.105`, the Alpine zigbee2mqtt container) as the OpenRC service
+`pywiz`, from a clone of this repo at `/root/pywiz` with its own venv at `/root/pywiz/venv`.
+Deploying is push to `main`, then run `/root/update_app.sh` inside the container:
+
+```bash
+git push
+```
+
+```bash
+pct exec 105 -- /root/update_app.sh
+```
+
+The script does `git pull origin main`, reinstalls `requirements.txt` into the venv and runs
+`rc-service pywiz restart`. It only lives on the server; this is what it does:
+
+```sh
+#!/bin/sh
+set -e
+
+APP_DIR="/root/pywiz"
+cd "$APP_DIR"
+git pull origin main
+
+. "$APP_DIR/venv/bin/activate"
+python -m ensurepip --upgrade
+python -m pip install --no-cache-dir -r requirements.txt
+
+rc-service pywiz restart
+echo "✔ Code updated"
+```
+
+`scenes.json` and `bindings.json` are git-ignored, so a pull never touches captured scenes or
+rebound buttons. Check it came back with `curl -s http://192.168.1.105:7007/room`.
+
 ## Rooms and bulbs
 
 | room | bulbs |
