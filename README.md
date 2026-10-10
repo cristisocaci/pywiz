@@ -135,7 +135,14 @@ moving it clears the old one, and assigning it to a button that was doing someth
 button over until you reset it. Anything that ends up matching the default again is dropped from
 the file rather than stored, so `bindings.json` only ever holds real differences.
 
-Toggle uses the room as a whole: the living room turns off if *any* of its bulbs is on.
+Toggle uses the room as a whole: the living room turns off if *any* of its bulbs is on. To know
+that it asks all four at once, and a bulb that has sat idle for hours can take seconds to answer,
+so it does not wait for everyone: the first "on" settles it, otherwise whoever answered within
+300 ms (`STATE_CHECK_DEADLINE`) decides, or the first answer if nobody did. Then the command goes
+to all four straight away, and a slow bulb switches as soon as it wakes. The price: if the only
+bulb that is on is also the one too slow to answer, the room counts as off and the press turns
+everything on — press again.
+
 Brightness steps are clamped to 26–255.
 
 ## Bulbs that do not answer
@@ -172,7 +179,7 @@ clap ─────wifi──────────────────�
 | sender → pywiz | `upstream_ms` | clap: board's NTP clock at publish → pywiz receives it. Button: zigbee2mqtt's `last_seen` (when z2m heard the button) → pywiz receives it. Needs z2m set up, see below |
 | radio | `linkquality` | the button's Zigbee signal as z2m reports it, 0–255; low values mean retries on the radio |
 | wait for event loop | `queue_ms` | MQTT thread hands the press over → it starts running. Should be ~0 |
-| each bulb request | `requests[]` | every `getPilot` / `setPilot`: when it started (`at_ms`, from the start of the press), how long it took (`ms`), and how many datagrams pywizlight had sent by then (`datagrams`) |
+| each bulb request | `requests[]` | every `getPilot` / `setPilot`: when it started (`at_ms`, from the start of the press), how long it took (`ms`), how many datagrams pywizlight had sent by then (`datagrams`), and `cancelled` when the toggle stopped waiting for that bulb's state (shown as "stopped waiting" in the ui — it cost the press nothing) |
 | total | `total_ms` | pywiz received the press → last bulb answered. Does **not** include `upstream_ms` |
 
 `verdict` is a one-line guess at the culprit, in this order: a bulb that never answered → a bulb
@@ -186,25 +193,27 @@ that needed retransmits → a slow sender → a busy event loop → otherwise ju
   "label": "living toggle", "upstream_ms": 31, "linkquality": 87, "queue_ms": 0,
   "requests": [
     {"bulb": "kitchen",    "method": "getPilot", "at_ms": 0,   "ms": 18,   "datagrams": 1},
-    {"bulb": "lamp_small", "method": "getPilot", "at_ms": 1,   "ms": 1640, "datagrams": 5},
-    {"bulb": "kitchen",    "method": "setPilot", "at_ms": 1642,"ms": 21,   "datagrams": 1}
+    {"bulb": "lamp_small", "method": "getPilot", "at_ms": 1,   "ms": 300,  "datagrams": 3, "cancelled": true},
+    {"bulb": "kitchen",    "method": "setPilot", "at_ms": 301, "ms": 21,   "datagrams": 1},
+    {"bulb": "lamp_small", "method": "setPilot", "at_ms": 301, "ms": 1340, "datagrams": 5}
   ],
   "unreachable": [], "total_ms": 1690,
-  "verdict": "lamp_small missed 4 packet(s), its getPilot took 1640ms"
+  "verdict": "lamp_small missed 4 packet(s), its setPilot took 1340ms"
 }
 ```
 
-Read it left to right along the path: the button reached pywiz in 31 ms with a fine signal, the
-press started at once, then the toggle had to know if the room was on and `lamp_small` took
-1.6 s to answer — the `setPilot`s could only go out after that (`at_ms` 1642). That is the bulb's
-Wi-Fi, not the button or MQTT.
+Read it left to right along the path: the button reached pywiz in 31 ms with a fine signal and the
+press started at once. The toggle asked every bulb if it was on; kitchen said "off" in 18 ms,
+`lamp_small` said nothing, so after 300 ms the toggle stopped waiting and sent everyone the
+command (`at_ms` 301). Kitchen was on 21 ms later; `lamp_small` missed four more packets and
+only came on 1.3 s after that. That is the bulb's Wi-Fi, not the button or MQTT.
 
 What the patterns usually mean:
 
 - **`datagrams` > 1 on a bulb** — it missed packets; the bulb's Wi-Fi was asleep or the signal is
   weak. Usually the first press after the lights sat idle. `getPilot` costs come before any
   `setPilot` can go out on toggles and brightness steps.
-- **an `error` / `unreachable` bulb** — no answer within 4 s: off at the wall, or off the network.
+- **an `error` / `unreachable` bulb** — `no answer within 4s`: off at the wall, or off the network.
 - **high `upstream_ms`** — the delay is before pywiz: z2m or the radio for the button (check
   `linkquality`), Wi-Fi or MQTT for clap-clap. Small negative or off-by-tens values are just the
   two clocks disagreeing.
@@ -235,12 +244,53 @@ advanced:
 While you are in there, check the button's own settings page has no **debounce** set — that
 holds every press back on purpose.
 
+### Keeping the bulbs awake
+
+The history showed what makes a press slow: the first press after the lights sat untouched for
+hours. Warm, a bulb answers in 10–200 ms; after hours idle, some bulbs ignored packets for 1–4 s
+(and once a bulb gave no answer at all within 4 s) while others in the same room answered at once
+— the bulbs' own Wi-Fi power saving, not the network or pywiz. So pywiz sends every bulb a
+`getPilot` every 60 s (`KEEPALIVE_INTERVAL`) in the background. It goes out on its own socket,
+never through pywizlight, so a press never queues behind a keepalive waiting on a sleepy bulb.
+Only the slow ones are logged, under `[keepalive]`:
+
+```
+08:14:02.117 [keepalive] slow to answer: kitchen 1210ms, living no answer
+```
+
+Lots of those mean the keepalive is not keeping that bulb warm; none, plus slow presses still in
+the history, would point somewhere else.
+
 ### Retries
 
 pywizlight on its own resends an unanswered datagram at 0.75 s, 2.25 s, 5.25 s… and waits 13 s.
 pywiz overrides that at the top of `pywiz.py` to resend at 0.2 s, 0.6 s, 1.1 s and every 0.5 s
 after, giving up after 4 s. `datagrams` is worked out from that schedule and the time the answer
 took, so it is the number sent by then, not a count off the wire.
+
+## pywizlight notes
+
+Things in pywizlight 0.6.3 that cost time or hide what happened, and what pywiz does about them:
+
+- **Slow retry schedule** (`bulb.py`, `_send_udp_message_with_retry`): see Retries above. The
+  constants are module globals read at call time, which is why overriding them works.
+- **One request per bulb at a time.** `wizlight.send` holds a per-bulb `asyncio.Lock` for the
+  whole request, retries included, so a second request to the same bulb waits until the first is
+  answered or times out. That is why the keepalive does not go through `wizlight`, and why the
+  toggle cancels the state checks it stops waiting for — cancelling frees the lock, so that bulb's
+  `setPilot` goes out at once instead of after the `getPilot` gives up.
+- **Timeouts look like connection errors.** `send` catches `OSError` before `TimeoutError`, and
+  since Python 3.11 a timeout *is* an `OSError`, so a bulb that never answered raises
+  `WizLightConnectionError('')`. pywiz logs that as `no answer within 4s`.
+- **No state cache without push.** `updateState` only reuses a known state when push updates
+  (`start_push`) are running, so every toggle and brightness step reads the bulb first. Push would
+  remove that read; it is not used, the state check deadline covers the slow case.
+- **Answers are matched by method, not request id**, so a late answer to an earlier retransmitted
+  request of the same method can be taken as the answer to a new one. Harmless for pywiz: the
+  state it carries is still current.
+- **`wizlight()` needs an event loop at construction** (`asyncio.get_event_loop()` in
+  `__init__`). Fine on the server; on Python 3.14 that raises when no loop is running, so
+  `import pywiz` fails there — set a loop first when testing locally.
 
 ## UI
 

@@ -4,7 +4,7 @@ from enum import Enum
 from pathlib import Path
 from pywizlight import wizlight, PilotBuilder
 from pywizlight.bulb import PilotParser
-from pywizlight.exceptions import WizLightError
+from pywizlight.exceptions import WizLightError, WizLightConnectionError
 from pywizlight.scenes import SCENES
 from pywizlight.utils import hex_to_percent
 from fastapi import FastAPI, HTTPException
@@ -29,6 +29,14 @@ wizlight_bulb.FIRST_SEND_INTERVAL = 0.2
 wizlight_bulb.MAX_BACKOFF = 0.5
 wizlight_bulb.MAX_SEND_DATAGRAMS = 12
 wizlight_bulb.TIMEOUT = 4
+
+# A toggle has to know if the room is on before it can switch it. After hours idle a bulb can take
+# 1-4s to answer, so decide on whoever answered within this, and send the command to everyone.
+STATE_CHECK_DEADLINE = 0.3
+
+# How often every bulb gets a getPilot in the background, so it is not cold when a press comes.
+KEEPALIVE_INTERVAL = 60
+KEEPALIVE_SLOW_MS = 500   # keepalive answers slower than this are logged
 
 # What the current log lines belong to ("single_button_1", "scene living/cooking"), and the
 # timing record of the press being run. asyncio copies both into every task, so the bulb calls
@@ -65,22 +73,35 @@ class TimedWizlight(wizlight):
         start = time.monotonic()
         method = msg_dict.get("method")
         error = None
+        cancelled = False
         try:
             return await super().send(msg_dict)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         except Exception as e:
-            error = repr(e)
+            error = describe_bulb_error(e)
             raise
         finally:
             elapsed = time.monotonic() - start
             datagrams = datagrams_sent(elapsed)
-            if error:
+            if cancelled:
+                log(f"{self.name} {method} stopped waiting after {elapsed * 1000:.0f}ms")
+            elif error:
                 log(f"{self.name} {method} failed after {elapsed * 1000:.0f}ms: {error}")
             else:
                 log(f"{self.name} {method} {elapsed * 1000:.0f}ms, ~{datagrams} datagram(s)")
 
             press = current_press.get()
             if press is not None:
-                press.add_request(self.name, method, start, elapsed, datagrams, error)
+                press.add_request(self.name, method, start, elapsed, datagrams, error, cancelled)
+
+def describe_bulb_error(e: Exception):
+    """pywizlight catches OSError before TimeoutError, and since Python 3.11 a timeout *is* an
+    OSError - so a bulb that never answered surfaces as WizLightConnectionError('')."""
+    if isinstance(e, WizLightConnectionError) and not str(e):
+        return f"no answer within {wizlight_bulb.TIMEOUT}s"
+    return repr(e)
 
 @dataclass
 class Receipt:
@@ -135,7 +156,7 @@ class Press:
             "requests": [],
         }
 
-    def add_request(self, bulb, method, start, elapsed, datagrams, error):
+    def add_request(self, bulb, method, start, elapsed, datagrams, error, cancelled=False):
         self.record["requests"].append({
             "bulb": bulb,
             "method": method,
@@ -143,6 +164,7 @@ class Press:
             "ms": round(elapsed * 1000),
             "datagrams": datagrams,
             **({"error": error} if error else {}),
+            **({"cancelled": True} if cancelled else {}),
         })
 
     def finish(self, label: str, unreachable):
@@ -159,7 +181,8 @@ def verdict(record):
     if record["unreachable"]:
         return f"no answer from {', '.join(record['unreachable'])}"
 
-    retried = [r for r in requests if r["datagrams"] > 1]
+    # A request we stopped waiting for (the toggle's state check) did not cost the press anything.
+    retried = [r for r in requests if r["datagrams"] > 1 and not r.get("cancelled")]
     if retried:
         worst = max(retried, key=lambda r: r["ms"])
         return (f"{worst['bulb']} missed {worst['datagrams'] - 1} packet(s), "
@@ -169,8 +192,9 @@ def verdict(record):
         return f"{record['source']} -> pywiz took {record['upstream_ms']}ms"
     if record["queue_ms"] > 100:
         return f"waited {record['queue_ms']}ms for the event loop"
-    if requests:
-        slowest = max(requests, key=lambda r: r["ms"])
+    waited_for = [r for r in requests if not r.get("cancelled")]
+    if waited_for:
+        slowest = max(waited_for, key=lambda r: r["ms"])
         return f"slowest step {slowest['bulb']} {slowest['method']} {slowest['ms']}ms"
     return "no bulb calls"
 
@@ -668,20 +692,37 @@ class Wiz:
             await bulb.turn_on(PilotBuilder(warm_white=255, brightness=255))
 
     async def _is_living_on(self):
-        """Ask every bulb at once - one by one, an all-off room costs four round trips in a row."""
+        """Whether any living bulb is on, without letting one sleepy bulb hold up the room.
+
+        Every bulb is asked at once. The first bulb that says "on" settles it; otherwise whoever
+        answered within STATE_CHECK_DEADLINE decides, and if nobody has by then, the first answer
+        does. Bulbs still silent are given up on, so the command goes out to everyone right away
+        and a sleepy bulb switches as soon as it wakes and hears the retransmitted setPilot."""
         start = time.monotonic()
-        names = list(self.living_bulbs)
-        states = await asyncio.gather(
-            *(self.living_bulbs[name].updateState() for name in names), return_exceptions=True)
+        tasks = {asyncio.ensure_future(bulb.updateState()): name for name, bulb in self.living_bulbs.items()}
+        pending = set(tasks)
+        answers = {}
+        deadline = start + STATE_CHECK_DEADLINE
 
-        is_on = False
-        for name, state in zip(names, states):
-            if isinstance(state, Exception):
-                log(f"Bulb '{name}' did not answer: {state!r}")
-            elif state is not None and state.get_state():
-                is_on = True
+        while pending and not any(answers.values()):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 and answers:
+                break
+            done, pending = await asyncio.wait(
+                pending, timeout=remaining if remaining > 0 else None, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                if task.exception() is not None:
+                    log(f"Bulb '{tasks[task]}' did not answer: {describe_bulb_error(task.exception())}")
+                elif task.result() is not None:
+                    answers[tasks[task]] = bool(task.result().get_state())
 
-        log(f"living is {'on' if is_on else 'off'}, state check took {ms_since(start)}")
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)  # frees each bulb's lock for the setPilot
+
+        is_on = any(answers.values())
+        skipped = f", did not wait for {', '.join(tasks[t] for t in pending)}" if pending else ""
+        log(f"living is {'on' if is_on else 'off'}, decided in {ms_since(start)}{skipped}")
         return is_on
 
     async def _modify_brightness(self, bulb: wizlight, step: int, min = 26, max = 255):
@@ -770,6 +811,47 @@ def with_unreachable(message: str, unreachable):
     return f"{message} (no answer from {', '.join(unreachable)})" if unreachable else message
 
 
+class _Ping(asyncio.DatagramProtocol):
+    def __init__(self):
+        self.answered = asyncio.get_running_loop().create_future()
+
+    def datagram_received(self, data, addr):
+        if not self.answered.done():
+            self.answered.set_result(None)
+
+async def ping_bulb(bulb: wizlight, timeout: float = 2):
+    """One getPilot on a socket of its own - pywizlight's per-bulb lock would otherwise make a press
+    queue behind a keepalive that is waiting on a sleepy bulb. Seconds to answer, or None."""
+    loop = asyncio.get_running_loop()
+    transport, protocol = await loop.create_datagram_endpoint(_Ping, remote_addr=(bulb.ip, bulb.port))
+    start = time.monotonic()
+    try:
+        transport.sendto(b'{"method":"getPilot","params":{}}')
+        await asyncio.wait_for(protocol.answered, timeout)
+        return time.monotonic() - start
+    except OSError:  # includes TimeoutError
+        return None
+    finally:
+        transport.close()
+
+async def keep_bulbs_awake():
+    """After hours without traffic the bulbs took 1-4s to answer the first press. Poke each one
+    every KEEPALIVE_INTERVAL so their Wi-Fi is not cold when a press comes; log the slow ones."""
+    current_action.set("keepalive")
+    while True:
+        await asyncio.sleep(KEEPALIVE_INTERVAL)
+        names = list(wiz.bulbs)
+        results = await asyncio.gather(*(ping_bulb(wiz.bulbs[name]) for name in names), return_exceptions=True)
+
+        slow = []
+        for name, result in zip(names, results):
+            if result is None or isinstance(result, BaseException):
+                slow.append(f"{name} no answer")
+            elif result * 1000 > KEEPALIVE_SLOW_MS:
+                slow.append(f"{name} {result * 1000:.0f}ms")
+        if slow:
+            log(f"slow to answer: {', '.join(slow)}")
+
 def on_connect(client, userdata, flags, reason_code, properties):
     log(f"MQTT connected with result code {reason_code}")
     client.subscribe("zigbee2mqtt/button")
@@ -804,7 +886,11 @@ async def lifespan(app: FastAPI):
     mqtt_client.loop_start()
     app.state.mqtt_client = mqtt_client
 
+    keepalive = asyncio.create_task(keep_bulbs_awake())
+
     yield  # application runs here
+
+    keepalive.cancel()
 
     # Shutdown logic
     app.state.mqtt_client.loop_stop()

@@ -240,7 +240,7 @@ function timingRow(t) {
   const line = (label, value) => value == null ? "" : `<div><span>${label}</span><b>${value}</b></div>`;
   const requests = t.requests.map(r => `<div class="${r.error ? "failed" : ""}">
       <span>+${r.at_ms}ms ${r.bulb} ${r.method}</span>
-      <b>${r.ms}ms${r.datagrams > 1 ? ` · ${r.datagrams} datagrams` : ""}${r.error ? " · no answer" : ""}</b>
+      <b>${r.ms}ms${r.datagrams > 1 ? ` · ${r.datagrams} datagrams` : ""}${r.error ? " · no answer" : ""}${r.cancelled ? " · stopped waiting" : ""}</b>
     </div>`).join("");
 
   return `<details class="timing">
