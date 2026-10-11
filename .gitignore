@@ -3,3 +3,6 @@
 /scenes.json
 /bindings.json
 /timings.jsonl
+/timings.db
+/timings.db-*
+/timings.jsonl.imported

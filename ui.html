@@ -36,7 +36,21 @@
   }
   header { display: flex; align-items: baseline; gap: .6rem; margin-bottom: 1rem; }
   h1 { font-size: 1.25rem; margin: 0; }
-  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 1.5rem 0 .6rem; }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0; }
+  details.section { margin-top: 1.1rem; }
+  details.section > summary {
+    display: flex; align-items: center; gap: .5rem; padding: .45rem 0 .6rem;
+    cursor: pointer; list-style: none; user-select: none;
+  }
+  details.section > summary::-webkit-details-marker { display: none; }
+  details.section > summary::before {
+    content: "▸"; color: var(--muted); font-size: .8rem; width: .8rem; transition: transform .15s;
+  }
+  details.section[open] > summary::before { transform: rotate(90deg); }
+  .pager { display: flex; align-items: center; gap: .5rem; margin: .2rem 0 .6rem; font-size: .8rem; color: var(--muted); }
+  .pager span { flex: 1; text-align: center; font-variant-numeric: tabular-nums; }
+  .pager button { padding: .35rem .7rem; font-size: .78rem; min-height: 2.1rem; }
+  .slow-only { display: flex; align-items: center; gap: .4rem; font-size: .8rem; color: var(--muted); margin-bottom: .5rem; }
   .refresh {
     margin-left: auto; background: none; border: 1px solid var(--line); color: var(--muted);
     border-radius: 999px; padding: .35rem .8rem; font-size: .8rem;
@@ -227,7 +241,7 @@ function buttonsTable() {
     </div>`;
   });
 
-  return `<section><h2>buttons</h2>${rows.join("")}</section>`;
+  return section("buttons", "buttons", rows.join(""));
 }
 
 // A press is "slow" past what a human notices, "very slow" past what they complain about.
@@ -260,10 +274,63 @@ function timingRow(t) {
   </details>`;
 }
 
-async function timingsSection() {
-  const presses = await api("/timings?limit=30");
-  const rows = presses.length ? presses.map(timingRow).join("") : `<p class="bulbs">no presses yet</p>`;
-  return `<section><h2>recent presses · tap for where the time went</h2>${rows}</section>`;
+// Sections fold away; which ones you closed is remembered on this device.
+function sectionOpen(id) {
+  try { return localStorage.getItem(`section:${id}`) !== "closed"; } catch { return true; }
+}
+
+function rememberSection(el) {
+  try { localStorage.setItem(`section:${el.dataset.id}`, el.open ? "open" : "closed"); } catch {}
+}
+
+function section(id, title, body) {
+  return `<details class="section" data-id="${id}" ${sectionOpen(id) ? "open" : ""} ontoggle="rememberSection(this)">
+    <summary><h2>${title}</h2></summary>
+    ${body}
+  </details>`;
+}
+
+const PRESSES_PER_PAGE = 20;
+let pressPage = 0;
+let slowOnly = false;
+
+// The whole history is kept on the server; this pages through it, newest first.
+async function loadPresses() {
+  const el = document.getElementById("presses");
+  if (!el) return;
+
+  const offset = pressPage * PRESSES_PER_PAGE;
+  const page = await api(`/timings?limit=${PRESSES_PER_PAGE}&offset=${offset}&slower_than=${slowOnly ? SLOW_MS : 0}`);
+  const last = offset + page.presses.length;
+  const pager = page.total > PRESSES_PER_PAGE ? `<div class="pager">
+      <button onclick="pagePresses(-1)" ${pressPage === 0 ? "disabled" : ""}>← newer</button>
+      <span>${offset + 1}–${last} of ${page.total}</span>
+      <button onclick="pagePresses(1)" ${last >= page.total ? "disabled" : ""}>older →</button>
+    </div>` : "";
+  const rows = page.presses.length
+    ? page.presses.map(timingRow).join("")
+    : `<p class="bulbs">${slowOnly ? "no slow presses" : "no presses yet"}</p>`;
+
+  el.innerHTML = `<label class="slow-only">
+      <input type="checkbox" ${slowOnly ? "checked" : ""} onchange="showSlowOnly(this.checked)">
+      only slow ones (≥ ${SLOW_MS} ms)
+    </label>${pager}${rows}${pager}`;
+}
+
+async function pagePresses(step) {
+  pressPage = Math.max(0, pressPage + step);
+  await loadPresses();
+  document.querySelector('[data-id="presses"]').scrollIntoView({block: "start"});
+}
+
+async function showSlowOnly(checked) {
+  slowOnly = checked;
+  pressPage = 0;
+  await loadPresses();
+}
+
+function pressesSection() {
+  return section("presses", "recent presses · tap for where the time went", `<div id="presses">loading…</div>`);
 }
 
 async function load() {
@@ -272,17 +339,16 @@ async function load() {
   const sections = await Promise.all(Object.keys(rooms).map(async room => {
     const scenes = await api(`/room/${room}/scenes`);
     const cards = Object.entries(scenes).map(([slug, scene]) => sceneCard(room, slug, scene)).join("");
-    return `<section>
-      <h2>${room} · ${Object.keys(rooms[room].bulbs).join(", ")}</h2>
+    return section(`room-${room}`, `${room} · ${Object.keys(rooms[room].bulbs).join(", ")}`, `
       ${cards}
       <div class="new">
         <input id="new-${room}" placeholder="new scene, e.g. candle" autocapitalize="off" autocorrect="off">
         <button onclick="captureNew('${room}')">capture</button>
-      </div>
-    </section>`;
+      </div>`);
   }));
 
-  document.getElementById("rooms").innerHTML = sections.join("") + buttonsTable() + await timingsSection();
+  document.getElementById("rooms").innerHTML = sections.join("") + buttonsTable() + pressesSection();
+  await loadPresses();
 }
 
 async function bind(room, slug, action) {
@@ -302,6 +368,7 @@ async function triggerButton(action) {
   } catch (e) {
     toast(e.message, true);
   }
+  await loadPresses();
 }
 
 async function deleteScene(room, slug) {
@@ -340,7 +407,7 @@ async function act(room, slug, action, exists = true) {
   try {
     const res = await api(`/room/${room}/scenes/${slug}/${action}`);
     toast(res.message);
-    if (action !== "trigger") await load();
+    await (action === "trigger" ? loadPresses() : load());
   } catch (e) {
     toast(e.message, true);
   }

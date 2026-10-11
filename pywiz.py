@@ -10,13 +10,13 @@ from pywizlight.utils import hex_to_percent
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, model_validator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 import paho.mqtt.client as mqtt
 import os
 import json
+import sqlite3
 import time
 import pywizlight.bulb as wizlight_bulb
-from collections import deque
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -199,45 +199,73 @@ def verdict(record):
     return "no bulb calls"
 
 class TimingHistory:
-    """The last presses with their timings, kept across restarts in timings.jsonl."""
+    """Every press with its timings, kept for good in a SQLite file next to pywiz.py.
 
-    def __init__(self, path: Path, keep: int = 500):
+    Each press is one row: the full record as JSON, plus the columns the history is filtered and
+    paged on. A connection per call, because sync routes run in FastAPI's threadpool while presses
+    are recorded on the event loop - SQLite connects in well under a millisecond."""
+
+    def __init__(self, path: Path, legacy_jsonl: Path | None = None):
         self.path = path
-        self.keep = keep
-        self.records = deque(maxlen=keep)
-        self.appended = 0
+        with self._connect() as db:
+            db.execute("""CREATE TABLE IF NOT EXISTS presses (
+                id INTEGER PRIMARY KEY,
+                at TEXT NOT NULL,
+                total_ms INTEGER NOT NULL,
+                record TEXT NOT NULL)""")
+        if legacy_jsonl is not None and legacy_jsonl.exists():
+            self._import_jsonl(legacy_jsonl)
 
-        if path.exists():
-            for line in path.read_text(encoding="utf-8").splitlines():
-                try:
-                    self.records.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-            self._rewrite()
+    def _connect(self):
+        return closing_sqlite(self.path)
 
-    def _rewrite(self):
-        with self.path.open("w", encoding="utf-8") as f:
-            f.writelines(json.dumps(record) + "\n" for record in self.records)
+    def _import_jsonl(self, jsonl: Path):
+        """Presses from before the database (timings.jsonl) move in once; the file is renamed so
+        it is not imported twice."""
+        records = []
+        for line in jsonl.read_text(encoding="utf-8").splitlines():
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        with self._connect() as db:
+            db.executemany("INSERT INTO presses (at, total_ms, record) VALUES (?, ?, ?)",
+                           [(r["at"], r.get("total_ms", 0), json.dumps(r)) for r in records])
+        jsonl.rename(jsonl.with_name(jsonl.name + ".imported"))
+        log(f"Imported {len(records)} presses from {jsonl.name}")
 
     def add(self, record):
-        self.records.append(record)
-        with self.path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+        with self._connect() as db:
+            db.execute("INSERT INTO presses (at, total_ms, record) VALUES (?, ?, ?)",
+                       (record["at"], record["total_ms"], json.dumps(record)))
 
-        # Appending is cheap; trim the file back to `keep` lines every `keep` presses.
-        self.appended += 1
-        if self.appended >= self.keep:
-            self._rewrite()
-            self.appended = 0
+    def page(self, limit: int, offset: int = 0, slower_than: int = 0):
+        """Newest first. `total` counts every press matching `slower_than`, for the pager."""
+        with self._connect() as db:
+            total = db.execute(
+                "SELECT COUNT(*) FROM presses WHERE total_ms >= ?", (slower_than,)).fetchone()[0]
+            rows = db.execute(
+                "SELECT record FROM presses WHERE total_ms >= ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                (slower_than, limit, offset)).fetchall()
+        return {"total": total, "offset": offset, "limit": limit,
+                "presses": [json.loads(row[0]) for row in rows]}
 
-    def recent(self, limit: int, slower_than: int = 0):
-        matching = [r for r in reversed(self.records) if r.get("total_ms", 0) >= slower_than]
-        return matching[:limit]
+@contextmanager
+def closing_sqlite(path: Path):
+    """A connection that commits on success and is always closed - sqlite3's own context manager
+    only commits, it leaves the connection open."""
+    db = sqlite3.connect(path)
+    try:
+        with db:
+            yield db
+    finally:
+        db.close()
 
 SCENES_FILE = Path(__file__).with_name("scenes.json")
 BINDINGS_FILE = Path(__file__).with_name("bindings.json")
 UI_FILE = Path(__file__).with_name("ui.html")
-TIMINGS_FILE = Path(__file__).with_name("timings.jsonl")
+TIMINGS_FILE = Path(__file__).with_name("timings.db")
+LEGACY_TIMINGS_FILE = Path(__file__).with_name("timings.jsonl")
 
 class WizCommand(str, Enum):
     """Everything a button can do that is not a scene."""
@@ -771,7 +799,7 @@ class Wiz:
             log(f"{bulb_name} is {on_off}. brightness {state.get_brightness()}; scene {scene}; warm {state.get_warm_white()}; cold {state.get_cold_white()}; rgb {state.get_rgb()}; colortemp {state.get_colortemp()}")
 
 wiz = Wiz()
-timings = TimingHistory(TIMINGS_FILE)
+timings = TimingHistory(TIMINGS_FILE, LEGACY_TIMINGS_FILE)
 main_loop = None
 
 async def execute_action(action: ButtonAction, receipt: Receipt):
@@ -1033,9 +1061,9 @@ def reset_scene(room: str, scene: str):
     }
 
 @app.get("/timings")
-def recent_timings(limit: int = 50, slower_than: int = 0):
-    """The last presses, newest first, with where the time went. `slower_than` is in ms."""
-    return timings.recent(limit, slower_than)
+def recent_timings(limit: int = 20, offset: int = 0, slower_than: int = 0):
+    """Presses newest first, with where the time went, a page at a time. `slower_than` is in ms."""
+    return timings.page(min(max(limit, 1), 500), max(offset, 0), slower_than)
 
 @app.get("/debug")
 def toggle_debug():

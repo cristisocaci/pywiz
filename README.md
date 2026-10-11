@@ -59,7 +59,7 @@ rc-service pywiz restart
 echo "✔ Code updated"
 ```
 
-`scenes.json`, `bindings.json` and `timings.jsonl` are git-ignored, so a pull never touches
+`scenes.json`, `bindings.json` and `timings.db` are git-ignored, so a pull never touches
 captured scenes, rebound buttons or the press history. Check it came back with `curl -s http://192.168.1.105:7007/room`.
 
 ## Rooms and bulbs
@@ -155,14 +155,26 @@ scene that is quietly missing a bulb.
 
 ## Why was that press slow?
 
-Slow presses come and go, so every press is timed and kept: the last 500 live in
-`timings.jsonl` next to `pywiz.py` (survives restarts), and the ui lists the newest 30 under
-**recent presses** — tap one to see where its time went. Right after a slow press, open the ui
-on your phone, or:
+Slow presses come and go, so every press is timed and kept **for good** in `timings.db`, a
+SQLite file next to `pywiz.py` — nothing is ever trimmed (a press is 1–2 KB, so even 30 a day is
+~20 MB a year). The ui's **recent presses** pages through all of it, 20 at a time, newest first,
+with an "only slow ones" filter — tap a press to see where its time went. Right after a slow
+press, open the ui on your phone, or:
 
 ```bash
 curl -s "http://192.168.1.105:7007/timings?slower_than=1000&limit=10"
 ```
+
+which returns `{"total": …, "offset": …, "limit": …, "presses": [...]}`; add `&offset=10` for
+the next page. To dig through it on the server instead:
+
+```bash
+pct exec 105 -- sqlite3 /root/pywiz/timings.db "SELECT at, total_ms, json_extract(record, '$.verdict') FROM presses WHERE total_ms > 1000 ORDER BY id DESC LIMIT 20"
+```
+
+(`apk add sqlite` first if the CLI is missing; the app only needs Python's built-in `sqlite3`.)
+The history used to be a capped `timings.jsonl`; on its first start the database version imports
+that file and renames it `timings.jsonl.imported`.
 
 ### The path a press takes
 
@@ -299,6 +311,9 @@ capture / trigger / reset button per scene. The point is the phone — set a mod
 switch to `http://<host>:7007/`, hit capture. The text box at the bottom of a room captures into
 a new scene, slugifying whatever you type ("Candle Test" → `candle-test`).
 
+Every section — each room, the buttons, recent presses — folds away by tapping its title, and the
+ui remembers which ones you closed on that phone.
+
 Each scene also has a dropdown of the sixteen button actions — pick one and the scene moves onto
 that button, with each option showing what it currently runs so you can see what you are taking
 over. Next to it, a **reset button** appears whenever the scene sits on a button you have changed,
@@ -334,6 +349,6 @@ editing it and reloading the page is enough.
 | `GET /buttons/{action}/default` | restore a button's default binding |
 | `POST /action` | run a button action, e.g. `{"action": "single_button_1"}` |
 | `GET` / `POST /brightness_step` | read or set the brightness step (default 75, resets on restart) |
-| `GET /timings?limit=50&slower_than=0` | the last presses, newest first, with where the time went (`slower_than` in ms) |
+| `GET /timings?limit=20&offset=0&slower_than=0` | a page of the press history, newest first, with where the time went: `{total, offset, limit, presses}` (`slower_than` in ms, `limit` up to 500) |
 | `GET /debug` | toggle bulb-state logging before and after each command |
 
