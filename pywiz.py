@@ -167,9 +167,11 @@ class Press:
             **({"cancelled": True} if cancelled else {}),
         })
 
-    def finish(self, label: str, unreachable):
+    def finish(self, label: str, unreachable, error: str | None = None):
         self.record["label"] = label
         self.record["unreachable"] = unreachable
+        if error:
+            self.record["error"] = error
         self.record["total_ms"] = round((time.monotonic() - self.receipt.mono) * 1000)
         self.record["verdict"] = verdict(self.record)
         timings.add(self.record)
@@ -178,6 +180,8 @@ class Press:
 def verdict(record):
     """One line on where the time went, so a slow press explains itself in the history."""
     requests = record["requests"]
+    if record.get("error"):
+        return f"failed: {record['error']}"
     if record["unreachable"]:
         return f"no answer from {', '.join(record['unreachable'])}"
 
@@ -820,15 +824,22 @@ async def execute_action(action: ButtonAction, receipt: Receipt):
         await wiz.print_state()
 
     unreachable = []
-    if binding.command is not None:
-        unreachable = await wiz.execute_command(binding.command)
-    else:
-        try:
-            unreachable = await wiz.apply_scene(binding.room, binding.scene)
-        except KeyError as e:
-            log(f"Button {action} points at a scene that is gone: {e.args[0]}")
-
-    press.finish(binding.label, unreachable)
+    error = None
+    try:
+        if binding.command is not None:
+            unreachable = await wiz.execute_command(binding.command)
+        else:
+            try:
+                unreachable = await wiz.apply_scene(binding.room, binding.scene)
+            except KeyError as e:
+                log(f"Button {action} points at a scene that is gone: {e.args[0]}")
+    except Exception as e:
+        error = repr(e)
+        log(f"Press failed: {error}")
+        raise
+    finally:
+        # Record the press even if the bulb code blew up, so the history has every press.
+        press.finish(binding.label, unreachable, error)
 
     if wiz.debug:
         log("Bulbs state after command")
