@@ -352,3 +352,8 @@ editing it and reloading the page is enough.
 | `GET /timings?limit=20&offset=0&slower_than=0` | a page of the press history, newest first, with where the time went: `{total, offset, limit, presses}` (`slower_than` in ms, `limit` up to 500) |
 | `GET /debug` | toggle bulb-state logging before and after each command |
 
+`/timings` has a consumer outside this repo: clap-lab (in the clap-clap repo, CT 105 :7008) pages
+through it every 5 minutes to copy clap presses it missed. It reads `total`, `offset` and `presses`,
+and from each press `at` (UTC, ISO), `source`, `action` and `pattern_ms`. Keep those, or update
+clap-lab's `sync_from_pywiz` alongside.
+
