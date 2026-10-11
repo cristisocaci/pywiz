@@ -50,6 +50,7 @@
   .pager { display: flex; align-items: center; gap: .5rem; margin: .2rem 0 .6rem; font-size: .8rem; color: var(--muted); }
   .pager span { flex: 1; text-align: center; font-variant-numeric: tabular-nums; }
   .pager button { padding: .35rem .7rem; font-size: .78rem; min-height: 2.1rem; }
+  .day { font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: .8rem 0 .35rem; }
   .slow-only { display: flex; align-items: center; gap: .4rem; font-size: .8rem; color: var(--muted); margin-bottom: .5rem; }
   .refresh {
     margin-left: auto; background: none; border: 1px solid var(--line); color: var(--muted);
@@ -308,13 +309,39 @@ async function loadPresses() {
       <button onclick="pagePresses(1)" ${last >= page.total ? "disabled" : ""}>older →</button>
     </div>` : "";
   const rows = page.presses.length
-    ? page.presses.map(timingRow).join("")
+    ? withDayHeadings(page.presses)
     : `<p class="bulbs">${slowOnly ? "no slow presses" : "no presses yet"}</p>`;
 
   el.innerHTML = `<label class="slow-only">
       <input type="checkbox" ${slowOnly ? "checked" : ""} onchange="showSlowOnly(this.checked)">
       only slow ones (≥ ${SLOW_MS} ms)
     </label>${pager}${rows}${pager}`;
+}
+
+// "today", "yesterday", or "fri 9 oct" for a press's `at` (pywiz's local time, no zone).
+function dayLabel(at) {
+  const day = at.slice(0, 10);
+  const local = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  const today = new Date();
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+  if (day === local(today)) return "today";
+  if (day === local(yesterday)) return "yesterday";
+
+  const [y, m, d] = day.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  const label = date.toLocaleDateString("en-GB", {weekday: "short", day: "numeric", month: "short"});
+  return y === today.getFullYear() ? label : `${label} ${y}`;
+}
+
+// A heading each time the day changes, so the rows only need the time.
+function withDayHeadings(presses) {
+  let lastDay = null;
+  return presses.map(t => {
+    const day = t.at.slice(0, 10);
+    const heading = day !== lastDay ? `<div class="day">${dayLabel(t.at)}</div>` : "";
+    lastDay = day;
+    return heading + timingRow(t);
+  }).join("");
 }
 
 async function pagePresses(step) {

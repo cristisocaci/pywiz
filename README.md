@@ -157,8 +157,8 @@ scene that is quietly missing a bulb.
 
 Slow presses come and go, so every press is timed and kept **for good** in `timings.db`, a
 SQLite file next to `pywiz.py` — nothing is ever trimmed (a press is 1–2 KB, so even 30 a day is
-~20 MB a year). The ui's **recent presses** pages through all of it, 20 at a time, newest first,
-with an "only slow ones" filter — tap a press to see where its time went. Right after a slow
+~20 MB a year). The ui's **recent presses** pages through all of it, 20 at a time, newest first and
+grouped under day headings, with an "only slow ones" filter — tap a press to see where its time went. Right after a slow
 press, open the ui on your phone, or:
 
 ```bash
