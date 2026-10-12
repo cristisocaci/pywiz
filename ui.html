@@ -248,8 +248,15 @@ function buttonsTable() {
 // A press is "slow" past what a human notices, "very slow" past what they complain about.
 const SLOW_MS = 500, VERY_SLOW_MS = 2000;
 
+// A press's `at` as a Date. New records say they're UTC ("+00:00"); older ones carry no zone, and
+// pywiz runs in a UTC container, so those are UTC too. Shown in the browser's local time.
+function pressDate(at) {
+  return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(at) ? at : at + "Z");
+}
+const localDay = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+
 function timingRow(t) {
-  const when = t.at.slice(11, 19);
+  const when = pressDate(t.at).toLocaleTimeString("en-GB", {hour12: false});
   const name = t.action.includes("_button_") ? actionLabel(t.action) : t.action;
   const totalClass = t.total_ms >= VERY_SLOW_MS ? "very-slow" : t.total_ms >= SLOW_MS ? "slow" : "";
   const line = (label, value) => value == null ? "" : `<div><span>${label}</span><b>${value}</b></div>`;
@@ -318,26 +325,23 @@ async function loadPresses() {
     </label>${pager}${rows}${pager}`;
 }
 
-// "today", "yesterday", or "fri 9 oct" for a press's `at` (pywiz's local time, no zone).
+// "today", "yesterday", or "fri 9 oct" for a press's `at`, by the browser's local date.
 function dayLabel(at) {
-  const day = at.slice(0, 10);
-  const local = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  const date = pressDate(at), day = localDay(date);
   const today = new Date();
   const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
-  if (day === local(today)) return "today";
-  if (day === local(yesterday)) return "yesterday";
+  if (day === localDay(today)) return "today";
+  if (day === localDay(yesterday)) return "yesterday";
 
-  const [y, m, d] = day.split("-").map(Number);
-  const date = new Date(y, m - 1, d);
   const label = date.toLocaleDateString("en-GB", {weekday: "short", day: "numeric", month: "short"});
-  return y === today.getFullYear() ? label : `${label} ${y}`;
+  return date.getFullYear() === today.getFullYear() ? label : `${label} ${date.getFullYear()}`;
 }
 
 // A heading each time the day changes, so the rows only need the time.
 function withDayHeadings(presses) {
   let lastDay = null;
   return presses.map(t => {
-    const day = t.at.slice(0, 10);
+    const day = localDay(pressDate(t.at));
     const heading = day !== lastDay ? `<div class="day">${dayLabel(t.at)}</div>` : "";
     lastDay = day;
     return heading + timingRow(t);

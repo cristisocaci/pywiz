@@ -19,7 +19,7 @@ import time
 import pywizlight.bulb as wizlight_bulb
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 # pywizlight resends a lost datagram only at 0.75s, 2.25s, 5.25s, 8.25s and waits 13s for an
 # answer, so one dropped packet costs a button press 0.75s and three cost 5s - and a bulb that is
@@ -146,7 +146,7 @@ class Press:
         self.receipt = receipt
         self.started = time.monotonic()
         self.record = {
-            "at": datetime.fromtimestamp(receipt.wall).isoformat(timespec="milliseconds"),
+            "at": datetime.fromtimestamp(receipt.wall, timezone.utc).isoformat(timespec="milliseconds"),
             "source": receipt.source,
             "action": name,
             "upstream_ms": receipt.upstream_ms,
